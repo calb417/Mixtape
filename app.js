@@ -5,7 +5,7 @@
 //  Paste your YouTube Data API key between the quotes.
 // =====================================================================
 const CONFIG = {
-  YOUTUBE_API_KEY: 'PASTE-YOUR-YOUTUBE-KEY-HERE',
+  YOUTUBE_API_KEY: 'AIzaSyDz0tlqHQZU8WFEoCWcc6w4VnK01l9sZYY',
 };
 // =====================================================================
 
