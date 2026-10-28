@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Mixtape</title>
+<meta name="theme-color" content="#121014">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Mixtape">
+<link rel="manifest" href="manifest.json">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="icon" type="image/png" href="icon-192.png">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@500&display=swap">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <div id="errors" class="errors" hidden></div>
+  <div id="app"></div>
+  <div id="sheet-root"></div>
+  <div id="toast" class="toast" hidden></div>
+  <!-- The YouTube player lives here. It stays tiny unless the phone needs one tap to allow sound. -->
+  <div id="yt-wrap" class="yt-wrap">
+    <div class="yt-unlock-text">Tap the video once to turn on sound.<br>You only need to do this once.</div>
+    <div id="yt-player"></div>
+  </div>
+  <script src="app.js"></script>
+  <script src="game.js"></script>
+</body>
+</html>
