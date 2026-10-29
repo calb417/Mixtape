@@ -6,7 +6,7 @@
 // =====================================================================
 const CONFIG = {
   YOUTUBE_API_KEY: 'AIzaSyDz0tlqHQZU8WFEoCWcc6w4VnK01l9sZYY',
-  LASTFM_API_KEY: 'PASTE-YOUR-LASTFM-KEY-HERE',
+  LASTFM_API_KEY: '506225735c83135da4286cc87db378b0',
 };
 // =====================================================================
 
