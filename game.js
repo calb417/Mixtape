@@ -1,7 +1,7 @@
 'use strict';
-/* Guess the Intro + DJ Mode. Needs app.js loaded first. */
+/* Guess the Intro + DJ Mode + the song pool (filters). Needs app.js and info.js loaded first. */
 
-/* ---------------- The YouTube player ---------------- */
+/* ================= The YouTube player ================= */
 const Player = {
   yt: null,
   loading: null,
@@ -12,7 +12,12 @@ const Player = {
     if (this.loading) return this.loading;
     this.loading = new Promise((resolve, reject) => {
       const timer = setTimeout(() => reject(new Error('The YouTube player took too long to load. Check the connection and try again.')), 20000);
-      window.onYouTubeIframeAPIReady = () => {
+      const create = () => {
+        if (!document.getElementById('yt-player')) {
+          const d = document.createElement('div');
+          d.id = 'yt-player';
+          $('#yt-wrap').appendChild(d);
+        }
         this.yt = new YT.Player('yt-player', {
           width: 300,
           height: 170,
@@ -28,6 +33,8 @@ const Player = {
           },
         });
       };
+      if (window.YT && window.YT.Player) { create(); return; }
+      window.onYouTubeIframeAPIReady = create;
       const s = document.createElement('script');
       s.src = 'https://www.youtube.com/iframe_api';
       s.onerror = () => { clearTimeout(timer); reject(new Error('Could not load the YouTube player. Check the connection.')); };
@@ -45,6 +52,8 @@ const Player = {
   },
   on(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); },
   onError(fn) { this.errorListeners.add(fn); return () => this.errorListeners.delete(fn); },
+  time() { try { return (this.yt && this.yt.getCurrentTime && this.yt.getCurrentTime()) || 0; } catch (e) { return 0; } },
+  duration() { try { return (this.yt && this.yt.getDuration && this.yt.getDuration()) || 0; } catch (e) { return 0; } },
   // iPhone sometimes wants one real tap on the video before it allows sound.
   showUnlock() { $('#yt-wrap').classList.add('unlock'); },
   finishUnlock() {
@@ -54,163 +63,288 @@ const Player = {
     toast('Sound is on. Tap Play clip.');
   },
   stop() { try { if (this.yt) this.yt.pauseVideo(); } catch (e) { /* ignore */ } },
+  // Throw the player away, so the lock screen and Now Playing have nothing to show.
+  reset() {
+    try { if (this.yt) { this.yt.stopVideo(); this.yt.destroy(); } } catch (e) { /* ignore */ }
+    const old = document.getElementById('yt-player');
+    if (old && old.tagName === 'IFRAME') old.remove();
+    this.yt = null;
+    this.loading = null;
+    this.state = -1;
+  },
 };
 
-/* ---------------- Game ---------------- */
+/* ================= Song pool: playlists + filters ================= */
+const BANDS = ['Big hits', 'Well known', 'Album tracks', 'Deep cuts', 'Rarities'];
+const bandOf = (rank) => (rank < 10 ? 0 : rank < 30 ? 1 : rank < 80 ? 2 : rank < 200 ? 3 : 4);
+const GENRES = ['rock', 'pop', 'hip-hop', 'alternative', 'indie', 'classic rock', 'metal', 'punk', 'pop punk', 'emo', 'grunge',
+  'new wave', 'r&b', 'soul', 'funk', 'disco', 'dance', 'electronic', 'country', 'folk', 'singer-songwriter', 'blues', 'jazz', 'reggae'];
+const DEC = { '50s': { tag: '50s', from: 1950 }, '60s': { tag: '60s', from: 1960 }, '70s': { tag: '70s', from: 1970 }, '80s': { tag: '80s', from: 1980 },
+  '90s': { tag: '90s', from: 1990 }, '00s': { tag: '00s', from: 2000 }, '10s': { tag: '2010s', from: 2010 }, '20s': { tag: '2020s', from: 2020 } };
+
+const Pool = {
+  gen: 0, list: null, arts: null, building: null, ahead: null, seen: new Set(), restarted: -1,
+  defaults: () => ({ playlists: [], artists: [], genres: [], decades: [], hits: null }),
+  get() {
+    let f = Store.get('filters', null);
+    if (!f) {
+      f = this.defaults();
+      const cur = Store.get('currentPool', '');   // v1 single pool
+      if (cur) f.playlists = [cur];
+      Store.set('filters', f, true);
+    }
+    f = Object.assign(this.defaults(), f);
+    const ids = new Set(Store.get('pools', []).map((p) => p.id));
+    f.playlists = f.playlists.filter((id) => ids.has(id));
+    return f;
+  },
+  set(f) { Store.set('filters', f); this.reset(); },
+  reset() { this.gen++; this.list = null; this.arts = null; this.building = null; this.ahead = null; },
+  hitsText(h) { return !h ? 'Any' : h[0] === h[1] ? BANDS[h[0]] : `${BANDS[h[0]]} – ${BANDS[h[1]]}`; },
+  label(f = this.get()) {
+    const parts = [];
+    const names = Store.get('pools', []).filter((p) => f.playlists.includes(p.id)).map((p) => p.name);
+    if (names.length) parts.push(names.join(' + '));
+    if (f.artists.length) parts.push(f.artists.map((a) => a.name).join(' + '));
+    if (f.decades.length) parts.push(f.decades.join(' + '));
+    if (f.genres.length && !f.artists.length) parts.push(f.genres.join(' + '));
+    if (f.hits) parts.push(this.hitsText(f.hits).toLowerCase());
+    return parts.join(' · ') || 'Popular songs';
+  },
+  mode(f) {
+    if (f.playlists.length) return 'P';        // saved playlists, filtered
+    if (f.artists.length) return 'A';          // picked artists (and albums)
+    if (!f.hits || f.hits[1] <= 1) return 'T'; // Last.fm top tracks for genres / decades / everything
+    return 'B';                                // deeper: through each genre's artists
+  },
+  async build(f, mode, status) {
+    if (mode === 'P') {
+      const map = new Map();
+      f.playlists.forEach((id) => Store.get('pool.' + id, []).forEach((it) => { if (!map.has(it.v)) map.set(it.v, Object.assign({ src: 'playlist' }, it)); }));
+      this.list = shuffle([...map.values()]);
+      return;
+    }
+    if (mode === 'A') { this.arts = f.artists.map((a) => ({ a, tracks: null })); return; }
+    const hard = (e) => { if (e instanceof ApiError && /key|busy|reach/i.test(e.message)) throw e; return []; };
+    if (mode === 'T') {
+      status('Gathering songs…');
+      const tags = [];
+      f.genres.forEach((g) => tags.push({ tag: g, src: 'genre' }));
+      f.decades.forEach((d) => {
+        tags.push({ tag: DEC[d].tag, src: 'decade' });
+        f.genres.forEach((g) => tags.push({ tag: `${d} ${g}`, src: 'combo' }));
+      });
+      const lists = tags.length
+        ? await Promise.all(tags.map((tg) => LastFM.tagTopTracks(tg.tag, 2).then((l) => l.map((x) => Object.assign(x, { src: tg.src }))).catch(hard)))
+        : [(await LastFM.chartTopTracks()).map((x) => Object.assign(x, { src: 'chart' }))];
+      const map = new Map();
+      lists.flat().forEach((x) => { const k = songKey(x.a, x.t); const had = map.get(k); if (!had || had.src === 'genre') map.set(k, x); });
+      this.list = shuffle([...map.values()]);
+      return;
+    }
+    status('Gathering artists…');
+    let names;
+    if (f.genres.length) names = (await Promise.all(f.genres.map((g) => LastFM.tagTopArtists(g).catch(hard)))).flat();
+    else if (f.decades.length) names = (await Promise.all(f.decades.map((d) => LastFM.tagTopArtists(DEC[d].tag).catch(hard)))).flat();
+    else names = await LastFM.chartTopArtists();
+    const seen = new Set();
+    this.arts = shuffle(names.filter((n) => { const k = norm(n); if (seen.has(k)) return false; seen.add(k); return true; }))
+      .map((n) => ({ a: { name: n }, tracks: null }));
+  },
+  async albumTitles(art) {
+    if (art._titles) return art._titles;
+    const sets = await Promise.all((art.albums || []).map((al) => MB.albumTracks(al.id, 1).catch(() => ({ tracks: [] }))));
+    art._titles = new Set(sets.flatMap((s) => s.tracks.map((t) => norm(cleanTitle(t.t)))));
+    return art._titles;
+  },
+  async artistTracks(e, f, mode) {
+    if (e.tracks) return e.tracks;
+    const a = e.a;
+    const range = f.hits || [0, 2];
+    let list;
+    if (mode === 'A' && a.albums && a.albums.length) {
+      const sets = await Promise.all(a.albums.map((al) => MB.albumTracks(al.id, 1).catch(() => ({ tracks: [] }))));
+      const seen = new Set();
+      list = sets.flatMap((s) => s.tracks).map((t) => cleanTitle(t.t))
+        .filter((t) => { const k = norm(t); if (!k || seen.has(k) || NOT_STUDIO.test(t)) return false; seen.add(k); return true; })
+        .map((t) => ({ a: a.name, t, src: 'artist' }));
+      if (f.hits) {
+        const top = await LastFM.topTracks(a.name).catch(() => []);
+        const rank = new Map(top.map((x, i) => [norm(x.t), i]));
+        const inBand = list.filter((x) => { const r = rank.has(norm(x.t)) ? bandOf(rank.get(norm(x.t))) : 4; return r >= range[0] && r <= range[1]; });
+        if (inBand.length) list = inBand;
+      }
+    } else {
+      const top = await LastFM.topTracks(a.name);
+      list = top.filter((x, i) => bandOf(i) >= range[0] && bandOf(i) <= range[1]);
+      if (!list.length && top.length) list = range[0] >= 2 ? top.slice(Math.floor(top.length / 2)) : top.slice(0, 10);
+      list = list.map((x) => ({ a: x.a, t: x.t, src: 'artist' }));
+    }
+    e.tracks = shuffle(list);
+    return e.tracks;
+  },
+  async candidate(f, mode) {
+    if (mode === 'P' || mode === 'T') return this.list.length ? this.list.pop() : null;
+    for (let tries = 0; tries < 15; tries++) {
+      const live = this.arts.filter((e) => !e.done);
+      if (!live.length) return null;
+      const e = live[Math.floor(Math.random() * live.length)];
+      let tracks;
+      try { tracks = await this.artistTracks(e, f, mode); }
+      catch (err) { if (err instanceof ApiError && /key|busy|reach/i.test(err.message)) throw err; e.done = true; continue; }
+      const c = tracks.pop();
+      if (!tracks.length) e.done = true;
+      if (c) return c;
+    }
+    return null;
+  },
+  async check(c, f, mode, status) {
+    const blocked = new Set(Store.get('blocked', []));
+    if (this.seen.has(songKey(c.a, c.t)) || (c.v && (this.seen.has(c.v) || blocked.has(c.v)))) return null;
+    if (mode === 'P') {
+      if (f.artists.length) {
+        const art = f.artists.find((a) => sim(a.name, c.a) >= 0.8);
+        if (!art) return null;
+        if (art.albums && art.albums.length && !(await this.albumTitles(art)).has(norm(cleanTitle(c.t)))) return null;
+      } else if (f.genres.length) {
+        const tags = await LastFM.artistTags(c.a).catch(() => []);
+        if (!f.genres.some((g) => tags.some((t) => t === g || t.includes(g)))) return null;
+      }
+      if (f.hits) {
+        const top = await LastFM.topTracks(c.a).catch(() => []);
+        const i = top.findIndex((x) => norm(x.t) === norm(cleanTitle(c.t)));
+        const b = i < 0 ? 4 : bandOf(i);
+        if (b < f.hits[0] || b > f.hits[1]) return null;
+      }
+    }
+    if (f.decades.length) {
+      let y = Year.known(c.a, c.t);
+      if (y === undefined) {
+        status(`Checking which songs are from the ${f.decades.join(' or ')}…`);
+        y = await Year.get(c.a, c.t).catch(() => 0);
+      }
+      if (y) { if (!f.decades.some((d) => y >= DEC[d].from && y < DEC[d].from + 10)) return null; }
+      else if (!(c.src === 'decade' || c.src === 'combo')) return null;
+    }
+    let v = c.v;
+    if (!v) {
+      v = await SongFinder.find(c.a, c.t);
+      if (!v && SongFinder.looked) this.misses = (this.misses || 0) + 1;
+      if (!v || blocked.has(v)) return null;
+    }
+    return { v, a: c.a, t: c.t };
+  },
+  async next(status = () => {}) {
+    const f = this.get(), mode = this.mode(f), gen = this.gen;
+    if (mode !== 'P' && !LastFM.ready()) throw new ApiError('No Last.fm key yet. Open app.js on GitHub and paste your Last.fm key in the marked spot at the top. (Playlists work without it.)');
+    if (!this.building) { this.building = this.build(f, mode, status); this.building.catch(() => { if (gen === this.gen) this.building = null; }); }
+    await this.building;
+    let tried = 0;
+    this.misses = 0;
+    for (;;) {
+      if (gen !== this.gen) return null;
+      if (this.misses >= 5) throw new ApiError("Couldn't find the last few songs on YouTube, so Mixtape stopped to save your daily lookups. Try Next song, or change the pool.");
+      const c = await this.candidate(f, mode);
+      if (!c) {
+        if (mode === 'P' && this.restarted !== gen && this.seen.size) {
+          this.restarted = gen;
+          this.seen.clear();
+          await this.build(f, mode, status);
+          toast("You've heard every song in this pool. Starting over.");
+          continue;
+        }
+        return null;
+      }
+      tried++;
+      if (tried > 200) return null;
+      if (tried > 3 && tried % 4 === 0) status(`Finding a song that fits… (${tried} checked)`);
+      const item = await this.check(c, f, mode, status);
+      if (gen !== this.gen) return null;
+      if (item) { this.seen.add(songKey(item.a, item.t)); this.seen.add(item.v); return item; }
+    }
+  },
+  take(status) {
+    const a = this.ahead;
+    this.ahead = null;
+    return a && a.gen === this.gen ? a.p : this.next(status);
+  },
+  prefetch() {
+    if (this.ahead && this.ahead.gen === this.gen) return;
+    const p = this.next();
+    p.catch(() => {});
+    this.ahead = { gen: this.gen, p };
+  },
+  // Every song in the chosen playlists (or all saved playlists), for DJ search
+  searchable() {
+    const f = this.get();
+    const ids = f.playlists.length ? f.playlists : Store.get('pools', []).map((p) => p.id);
+    const map = new Map();
+    ids.forEach((id) => Store.get('pool.' + id, []).forEach((it) => { if (!map.has(it.v)) map.set(it.v, it); }));
+    const blocked = new Set(Store.get('blocked', []));
+    return [...map.values()].filter((it) => !blocked.has(it.v));
+  },
+};
+
+/* ================= Clip length slider (left half 0.1–1 s, right half 1–60 s) ================= */
+const ONE = STOPS.indexOf(1);
+function stopPos(i) { return i <= ONE ? (i / ONE) * 0.5 : 0.5 + ((i - ONE) / (STOPS.length - 1 - ONE)) * 0.5; }
+function nearestStop(p) {
+  let best = 0, d = 9;
+  STOPS.forEach((_, i) => { const x = Math.abs(stopPos(i) - p); if (x < d) { d = x; best = i; } });
+  return best;
+}
+const EQ = '<span class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i></span>';
+
+/* ================= Game ================= */
 const Game = {
   mode: 'guess',          // 'guess' | 'dj'
   djPicking: true,
-  items: [],
-  queue: [],
-  seen: new Set(),
   round: null,
-  count: 0,
   clipTimer: null,
   token: 0,
   unlocked: false,
   offs: [],
+  ticker: null,
 
-  /* ---- pools ---- */
-  pools() { return Store.get('pools', []); },
-  currentPoolId() { return Store.get('currentPool', ''); },
-  poolLabel() {
-    const p = this.pools().find((x) => x.id === this.currentPoolId());
-    return p ? p.name : 'Pick a playlist';
-  },
-  loadItems() {
-    const id = this.currentPoolId();
-    this.items = id ? Store.get('pool.' + id, []) : [];
-    this.queue = [];
-  },
-  nextItem() {
-    const never = new Set(Store.get('neverUse', []));
-    const blocked = new Set(Store.get('blocked', []));
-    const usable = (it) => !never.has(it.v) && !blocked.has(it.v);
-    for (let pass = 0; pass < 2; pass++) {
-      while (this.queue.length) {
-        const it = this.queue.shift();
-        if (usable(it) && !this.seen.has(it.v)) return it;
-      }
-      let fresh = this.items.filter((it) => usable(it) && !this.seen.has(it.v));
-      if (!fresh.length) {
-        fresh = this.items.filter(usable);
-        if (fresh.length && this.seen.size) toast("You've heard every song in this pool. Starting over.");
-        this.seen.clear();
-      }
-      this.queue = shuffle(fresh.slice());
-    }
-    return null;
-  },
-
-  openPools(onDone) {
-    const self = this;
-    const render = () => {
-      const pools = self.pools();
-      const cur = self.currentPoolId();
-      return `<p class="muted" style="margin-top:0">Pick the playlist the game draws songs from. <button class="link-btn" data-p="how">How to add one</button></p>
-        ${pools.map((p) => `<div class="pool-item ${p.id === cur ? 'on' : ''}">
-          <button class="main" data-p="use" data-id="${esc(p.id)}"><div class="n">${esc(p.name)}${p.id === cur ? ' ✓' : ''}</div><div class="c">${p.count} songs · updated ${esc((p.updated || '').slice(0, 10))}</div></button>
-          <button class="btn small" data-p="refresh" data-id="${esc(p.id)}">Refresh</button>
-          <button class="icon-btn" data-p="remove" data-id="${esc(p.id)}" aria-label="Remove ${esc(p.name)}">${ICON.close}</button>
-        </div>`).join('') || '<p>No playlists yet.</p>'}
-        <h3>Add a YouTube Music playlist</h3>
-        <input class="field" data-p="link" placeholder="Paste the playlist link" autocomplete="off" autocapitalize="off" spellcheck="false">
-        <div class="row" style="margin-top:10px"><button class="btn primary wide" data-p="add">Add</button></div>
-        <p class="muted" data-p="status" style="min-height:22px"></p>`;
-    };
-    Sheets.open({
-      title: 'Song pools',
-      html: render(),
-      onMount(body, close) {
-        const status = (t) => { const s = body.querySelector('[data-p=status]'); if (s) s.textContent = t; };
-        const refreshUI = () => { body.innerHTML = render(); };
-        const fetchPool = async (id, existingName) => {
-          status('Reading the playlist…');
-          const name = existingName || await YTData.playlistName(id);
-          const items = await YTData.playlistItems(id, (n, total) => status(`Reading the playlist… ${n}${total ? ' of ' + total : ''} songs`));
-          if (!items.length) throw new ApiError('That playlist has no playable songs.');
-          Store.set('pool.' + id, items);
-          const pools = self.pools().filter((p) => p.id !== id);
-          pools.push({ id, name, count: items.length, updated: new Date().toISOString() });
-          Store.set('pools', pools);
-          Store.set('currentPool', id);
-          self.loadItems();
-          return { name, count: items.length };
-        };
-        body.addEventListener('click', async (e) => {
-          const b = e.target.closest('[data-p]');
-          if (!b) return;
-          const p = b.dataset.p;
-          try {
-            if (p === 'how') showHelp('pools');
-            if (p === 'use') { Store.set('currentPool', b.dataset.id); self.loadItems(); close(); if (onDone) onDone(); }
-            if (p === 'remove') {
-              const pool = self.pools().find((x) => x.id === b.dataset.id);
-              if (pool && confirm(`Remove "${pool.name}" from Mixtape? (It stays in YouTube Music.)`)) {
-                Store.set('pools', self.pools().filter((x) => x.id !== pool.id));
-                Store.del('pool.' + pool.id);
-                if (self.currentPoolId() === pool.id) { Store.set('currentPool', ''); self.loadItems(); }
-                refreshUI();
-              }
-            }
-            if (p === 'refresh') {
-              b.disabled = true;
-              const pool = self.pools().find((x) => x.id === b.dataset.id);
-              const r = await fetchPool(b.dataset.id, pool && pool.name);
-              refreshUI();
-              toast(`${r.name}: ${r.count} songs`);
-            }
-            if (p === 'add') {
-              const link = body.querySelector('[data-p=link]').value;
-              const id = YTData.parsePlaylistId(link);
-              if (!id) { status("That doesn't look like a playlist link. In YouTube Music: playlist → ⋯ → Share → Copy link."); return; }
-              b.disabled = true;
-              const r = await fetchPool(id);
-              toast(`Added ${r.name}: ${r.count} songs`);
-              close();
-              if (onDone) onDone();
-            }
-          } catch (err) {
-            b.disabled = false;
-            status('');
-            Errors.show(err.message || String(err), err instanceof ApiError ? '' : err);
-          }
-        });
-      },
-    });
-  },
+  poolLabel() { return Pool.label(); },
 
   /* ---- screen ---- */
   html() {
     const dj = this.mode === 'dj';
-    const s = Settings.get();
-    const idx = Math.max(0, Math.min(STOPS.length - 1, s.clipIndex));
-    return `<div class="screen" id="game-root">
+    const scale = [0, 3, ONE, 9, STOPS.length - 1].map((i) => `<span style="left: calc(12px + ${stopPos(i).toFixed(4)} * (100% - 24px))">${i === STOPS.length - 1 ? '60 s' : STOPS[i]}</span>`).join('');
+    return `<div class="screen game-screen ${dj ? 'dj-mode' : ''}" id="game-root">
       <header class="topbar">
         <button class="icon-btn" data-g="home" aria-label="Back to home">${ICON.back}</button>
-        <div class="title"><h1>Guess the Intro</h1><div class="sub" id="g-sub">${dj ? 'DJ mode' : 'Song ' + (this.count || 1)}</div></div>
+        <div class="title"><h1>Guess the Intro</h1></div>
         <button class="icon-btn" data-g="help" aria-label="Help">?</button>
       </header>
-      <div class="mode-switch" role="tablist">
-        <button data-g="mode-guess" class="${dj ? '' : 'on'}" role="tab" aria-selected="${!dj}">Guess</button>
-        <button data-g="mode-dj" class="${dj ? 'on' : ''}" role="tab" aria-selected="${dj}">DJ</button>
+      <div class="game-bar">
+        <div class="seg" role="tablist">
+          <button data-g="mode-guess" class="${dj ? '' : 'on'}" role="tab" aria-selected="${!dj}">Guess</button>
+          <button data-g="mode-dj" class="${dj ? 'on' : ''}" role="tab" aria-selected="${dj}">DJ</button>
+        </div>
+        <button class="pool-chip" data-g="pools" aria-label="Song pool: ${esc(Pool.label())}">${ICON.filter}<span class="name">${esc(Pool.label())}</span></button>
       </div>
-      <button class="pool-bar" data-g="pools"><span class="name">Pool: ${esc(this.poolLabel())}</span><span class="chg">Change</span></button>
 
       <div id="dj-pick" class="dj-pick" ${dj && this.djPicking ? '' : 'hidden'}>
-        <input class="search" id="dj-q" placeholder="Search this pool…" autocomplete="off" autocapitalize="off" spellcheck="false">
-        <button class="btn small" data-g="dj-yt" style="align-self:flex-start">Search all of YouTube instead</button>
+        <div class="row">
+          <button class="btn primary" style="flex:1" data-g="dj-random">${ICON.dice} Random pick</button>
+          <button class="btn" style="flex:1" data-g="dj-yt">Search YouTube</button>
+        </div>
+        <input class="search" id="dj-q" placeholder="Search your playlists…" autocomplete="off" autocapitalize="off" spellcheck="false">
         <div class="results" id="dj-results"></div>
       </div>
 
-      <div id="play-area" ${dj && this.djPicking ? 'hidden' : ''}>
-        <div class="dj-info" id="dj-info" ${dj ? '' : 'hidden'}></div>
+      <div id="play-area" class="play-area" ${dj && this.djPicking ? 'hidden' : ''}>
         <div class="card-wrap">
           <div class="flip">
             <div class="face front">
-              <div class="top"><span>SIDE A</span><span>MIXTAPE</span></div>
-              <div class="lines"><i></i><i></i><div class="q">?</div><i></i><i></i></div>
-              <div class="cap" id="g-cap">Name that song</div>
+              <div class="jfront">
+                <div class="top"><span>SIDE A</span><span>MIXTAPE</span></div>
+                <div class="lines"><i></i><i></i><div class="q">?</div><i></i><i></i></div>
+                <div class="cap" id="g-cap">Name that song</div>
+              </div>
+              <div class="djfront" id="g-djart"></div>
             </div>
             <div class="face back" id="g-back"><span class="noart">ALBUM ART</span></div>
           </div>
@@ -218,50 +352,52 @@ const Game = {
 
         <div class="stage">
           <div class="layer info">
-            <div class="song-title" id="g-title"></div>
-            <div class="song-artist" id="g-artist"></div>
-            <div class="song-album" id="g-album"></div>
-            <div class="song-note" id="g-note"></div>
-            <div class="info-actions">
-              <button class="btn small" data-g="restart">${ICON.restart} From start</button>
-              <button class="btn small" data-g="ytm">${ICON.out} YouTube Music</button>
-              <button class="btn small ghost" data-g="never">Never use</button>
+            <button class="song-title tap" id="g-title"></button>
+            <button class="song-artist tap" id="g-artist"></button>
+            <button class="song-album tap" id="g-album"></button>
+            <div class="mini">
+              <button class="mini-btn" data-g="pp" id="g-pp" aria-label="Pause">${ICON.pause}</button>
+              <div class="mini-main">
+                <input type="range" id="g-scrub" min="0" max="1000" step="1" value="0" aria-label="Song position">
+                <div class="mini-times"><span id="g-cur">0:00</span><span id="g-eq">${EQ}</span><span id="g-dur">0:00</span></div>
+              </div>
+              <button class="mini-btn" data-g="restart" aria-label="Play from the start">${ICON.restart}</button>
             </div>
+            <div class="info-actions"><button class="btn small" data-g="ytm">${ICON.out} Open in YouTube Music</button></div>
           </div>
           <div class="layer controls">
             <div class="clip">
-              <div class="clip-head"><span class="muted" style="font-size:13px">Clip length</span><span class="v" id="g-len"></span></div>
+              <div class="clip-head"><span class="muted">Clip length</span><span class="v" id="g-len"></span></div>
               <div class="clip-row">
                 <button class="icon-btn" data-g="shorter" aria-label="Shorter clip">−</button>
-                <input type="range" id="g-slider" min="0" max="${STOPS.length - 1}" step="1" value="${idx}" aria-label="Clip length">
+                <div class="slider-box">
+                  <input type="range" id="g-slider" min="0" max="1000" step="1" aria-label="Clip length">
+                  <div class="clip-scale" aria-hidden="true">${scale}</div>
+                </div>
                 <button class="icon-btn" data-g="longer" aria-label="Longer clip">+</button>
               </div>
-              <div class="clip-scale"><span>0.1</span><span>1</span><span>60 s</span></div>
             </div>
-            <div class="pad" style="margin-top:14px">
-              <button class="btn big primary wide" data-g="play" id="g-play">${ICON.play} Play clip</button>
+            <button class="btn big primary playbtn" data-g="play" id="g-play"><span class="prog" id="g-prog"></span><span class="lbl" id="g-play-lbl">${ICON.play} Play clip</span></button>
+            <div class="row two">
+              <button class="btn" data-g="more" id="g-more">More time</button>
+              <button class="btn" data-g="skip">Skip silence</button>
             </div>
-            <div class="row pad" style="margin-top:10px">
-              <button class="btn" style="flex:1" data-g="more" id="g-more">More time</button>
-              <button class="btn" style="flex:1" data-g="skip">Skip silence</button>
-            </div>
-            <div class="start-at" id="g-start"></div>
-            <div class="start-tools" id="g-tools" hidden>
-              <button class="btn" data-g="undo">Undo</button>
-              <button class="btn" data-g="back">−0.25 s</button>
-              <button class="btn" data-g="zero">0:00</button>
+            <div class="start-row">
+              <span id="g-start">starts at 0:00</span>
+              <span class="start-tools" id="g-tools" hidden>
+                <button data-g="undo">Undo</button><button data-g="back">−0.25 s</button><button data-g="zero">0:00</button>
+              </span>
             </div>
           </div>
         </div>
 
         <div class="bottom-bar">
           <div class="layer controls">
-            <button class="btn ghost" style="width:96px" data-g="pass">Pass</button>
-            <button class="btn light" style="flex:1" data-g="reveal" id="g-reveal">Reveal</button>
+            ${dj ? '<button class="btn" style="flex:1" data-g="dj-new">New pick</button><button class="btn light" style="flex:1.6" data-g="reveal" id="g-reveal">Reveal</button>'
+              : '<button class="btn light" style="flex:1" data-g="reveal" id="g-reveal">Reveal</button>'}
           </div>
           <div class="layer info">
-            ${dj
-              ? '<button class="btn" style="flex:1" data-g="dj-again">Pick again</button><button class="btn primary" style="flex:1.4" data-g="dj-pass">Pass the phone</button>'
+            ${dj ? '<button class="btn" style="flex:1" data-g="dj-again">Pick again</button><button class="btn primary" style="flex:1.4" data-g="dj-pass">Pass the phone</button>'
               : '<button class="btn primary" style="flex:1" data-g="next">Next song</button>'}
           </div>
         </div>
@@ -271,102 +407,117 @@ const Game = {
 
   mount(root) {
     this.root = root.querySelector('#game-root');
-    this.loadItems();
     this.bind();
     this.updateClipUI();
     this.offs.push(Player.onError((code) => this.onPlayerError(code)));
+    this.offs.push(Player.on((s) => this.onState(s)));
     Player.load().catch((e) => Errors.show(e.message));
-    if (this.items.length) firstVisit('game');
+    firstVisit('game');
     if (this.mode === 'dj') {
-      if (this.djPicking) this.renderDJResults('');
-      else this.renderDJInfo();
+      if (this.djPicking || !this.round) this.showDJPick();
+      else this.restoreRound();
       return;
     }
-    if (!this.items.length) {
-      $('#g-cap').textContent = 'Pick a pool to start';
-      this.setEnabled(false);
-      setTimeout(() => this.openPools(() => route()), 400);
-      return;
-    }
-    if (!this.round || !this.round.item) this.startRound(this.nextItem());
+    if (!this.round || !this.round.item) this.newRound();
     else this.restoreRound();
   },
   leave() {
-    clearTimeout(this.clipTimer);
+    this.stopTimers();
     this.token++;
+    this.roundSeq++;
     Player.stop();
     this.offs.forEach((off) => off());
     this.offs = [];
+  },
+  stopTimers() {
+    clearTimeout(this.clipTimer);
+    cancelAnimationFrame(this.raf);
+    clearInterval(this.ticker);
+    this.ticker = null;
   },
 
   bind() {
     const r = this.root;
     r.addEventListener('click', (e) => {
       const b = e.target.closest('[data-g]');
-      if (!b) return;
+      if (!b || b.disabled) return;
       const a = b.dataset.g;
       const map = {
         home: () => go('#home'),
         help: () => showHelp('game'),
         pools: () => this.openPools(() => { this.round = null; route(); }),
-        'mode-guess': () => { if (this.mode !== 'guess') { this.mode = 'guess'; this.round = null; route(); } },
+        'mode-guess': () => { if (this.mode !== 'guess') { this.mode = 'guess'; this.round = null; Player.stop(); route(); } },
         'mode-dj': () => { if (this.mode !== 'dj') { this.mode = 'dj'; this.djPicking = true; this.round = null; Player.stop(); route(); } },
         play: () => this.playClip(),
         more: () => this.moreTime(),
         skip: () => this.skipSilence(),
         undo: () => this.setStart(this.round.undo.length ? this.round.undo.pop() : 0),
-        back: () => this.setStart(Math.max(0, this.round.start - 0.25)),
+        back: () => { this.round.undo.push(this.round.start); this.setStart(Math.max(0, this.round.start - 0.25)); },
         zero: () => { this.round.undo.push(this.round.start); this.setStart(0); },
         shorter: () => this.setClipIndex(Settings.get().clipIndex - 1),
         longer: () => this.setClipIndex(Settings.get().clipIndex + 1),
         reveal: () => this.reveal(),
-        pass: () => this.next(true),
-        next: () => this.next(false),
+        next: () => this.next(),
+        pp: () => this.togglePause(),
         restart: () => { try { Player.yt.seekTo(0, true); Player.yt.unMute(); Player.yt.playVideo(); } catch (err) { /* ignore */ } },
-        ytm: () => { if (this.round) window.open('https://music.youtube.com/watch?v=' + this.round.item.v, '_blank'); },
-        never: () => this.neverUse(),
+        ytm: () => { if (this.round) { Player.stop(); openYTMusic(this.round.item.v); } },
         'dj-yt': () => this.djSearchYouTube(),
-        'dj-again': () => { this.unreveal(); setTimeout(() => this.showDJPick(), 380); },
+        'dj-random': () => this.djRandom(),
+        'dj-new': () => this.showDJPick(),
+        'dj-again': () => { this.unreveal(); setTimeout(() => this.showDJPick(), 300); },
         'dj-pass': () => this.passPhone(),
       };
-      if (map[a]) {
-        if (this.round == null && ['undo', 'back', 'zero', 'skip', 'more', 'play', 'reveal'].includes(a)) return;
-        map[a]();
-      }
+      if (!map[a]) return;
+      if (this.round == null && ['undo', 'back', 'zero', 'skip', 'more', 'play', 'reveal', 'pp', 'restart'].includes(a)) return;
+      map[a]();
     });
     const slider = r.querySelector('#g-slider');
-    if (slider) slider.addEventListener('input', () => this.setClipIndex(parseInt(slider.value, 10)));
+    slider.addEventListener('input', () => {
+      const i = nearestStop(parseInt(slider.value, 10) / 1000);
+      if (i !== Settings.get().clipIndex) this.setClipIndex(i, true);
+    });
+    slider.addEventListener('change', () => this.updateClipUI());
+    const scrub = r.querySelector('#g-scrub');
+    scrub.addEventListener('input', () => {
+      this.scrubbing = true;
+      const d = Player.duration();
+      $('#g-cur').textContent = fmtTime((d * parseInt(scrub.value, 10)) / 1000);
+    });
+    scrub.addEventListener('change', () => {
+      const d = Player.duration();
+      try { Player.yt.seekTo((d * parseInt(scrub.value, 10)) / 1000, true); Player.yt.playVideo(); } catch (e) { /* ignore */ }
+      this.scrubbing = false;
+    });
     const q = r.querySelector('#dj-q');
-    if (q) {
-      q.addEventListener('input', () => { clearTimeout(this.djTimer); this.djTimer = setTimeout(() => this.renderDJResults(q.value), 120); });
-      q.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); clearTimeout(this.djTimer); this.renderDJResults(q.value); } });
-    }
-    const res = r.querySelector('#dj-results');
-    if (res) res.addEventListener('click', (e) => {
+    q.addEventListener('input', () => { clearTimeout(this.djTimer); this.djTimer = setTimeout(() => this.renderDJResults(q.value), 120); });
+    q.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); q.blur(); clearTimeout(this.djTimer); this.renderDJResults(q.value); } });
+    r.querySelector('#dj-results').addEventListener('click', (e) => {
       const b = e.target.closest('[data-pick]');
       if (!b) return;
       const item = this.djCandidates[parseInt(b.dataset.pick, 10)];
-      if (item) this.djChoose(item);
+      if (item) { SongFinder.remember(item.a, item.t, item.v); this.djChoose(item); }
     });
   },
 
   setEnabled(on) {
     ['g-play', 'g-reveal', 'g-more'].forEach((id) => { const el = document.getElementById(id); if (el) el.disabled = !on; });
   },
+  caption(t) { const c = $('#g-cap'); if (c) c.textContent = t; },
 
   /* ---- clip length ---- */
-  setClipIndex(i) {
+  setClipIndex(i, fromSlider) {
     i = Math.max(0, Math.min(STOPS.length - 1, i));
     Settings.set({ clipIndex: i });
     if (this.round) { this.round.base = STOPS[i]; this.round.len = STOPS[i]; }
-    this.updateClipUI();
+    this.updateClipUI(fromSlider);
   },
-  updateClipUI() {
+  updateClipUI(fromSlider) {
     const i = Settings.get().clipIndex;
     const slider = $('#g-slider');
     if (slider) {
-      slider.value = i;
-      slider.style.setProperty('--fill', (i / (STOPS.length - 1)) * 100 + '%');
+      const p = stopPos(i);
+      if (!fromSlider) slider.value = Math.round(p * 1000);
+      slider.style.setProperty('--fill', `calc(12px + ${p.toFixed(4)} * (100% - 24px))`);
     }
     const base = STOPS[i];
     const len = this.round ? this.round.len : base;
@@ -376,31 +527,51 @@ const Game = {
     if (more) more.textContent = `More time +${fmtSec(this.round ? this.round.base : base)}`;
     const st = $('#g-start');
     const tools = $('#g-tools');
-    if (st && this.round) {
-      st.textContent = `starts at ${this.round.start.toFixed(2).replace(/0$/, '')} s`;
-      if (tools) tools.hidden = !(this.round.start > 0 || this.round.undo.length);
-    } else if (st) st.textContent = 'starts at 0.0 s';
+    const start = this.round ? this.round.start : 0;
+    if (st) st.textContent = start > 0 ? `starts at ${fmtSec(start)}` : 'starts at 0:00';
+    if (tools) tools.hidden = !(this.round && (this.round.start > 0 || this.round.undo.length));
   },
 
   /* ---- rounds ---- */
-  async startRound(item) {
-    clearTimeout(this.clipTimer);
+  async newRound() {
+    const myRound = ++this.roundSeq;
+    this.stopTimers();
     this.token++;
-    if (!item) {
-      $('#g-cap').textContent = 'No songs left to play in this pool';
-      this.setEnabled(false);
+    Player.stop();
+    this.round = null;
+    this.root.classList.remove('revealed');
+    this.setEnabled(false);
+    this.caption('Finding a song…');
+    let item;
+    try {
+      item = await Pool.take((t) => { if (myRound === this.roundSeq) this.caption(t); });
+    } catch (e) {
+      if (myRound !== this.roundSeq) return;
+      this.caption('Could not get a song');
+      Errors.show(e.message || String(e), e instanceof ApiError ? '' : e);
       return;
     }
+    if (myRound !== this.roundSeq) return;
+    if (!item) {
+      const f = Pool.get();
+      const empty = !f.playlists.length && !f.artists.length && !f.genres.length && !f.decades.length && !LastFM.ready();
+      this.caption(empty ? 'Pick a pool to start' : 'No songs fit this pool. Tap the pool bar to change it.');
+      if (empty) setTimeout(() => this.openPools(() => { this.round = null; route(); }), 400);
+      return;
+    }
+    this.startRound(item);
+  },
+  roundSeq: 0,
+  async startRound(item) {
+    this.stopTimers();
+    this.token++;
     const base = STOPS[Settings.get().clipIndex];
-    this.round = { item, base, len: base, start: 0, undo: [], tries: 0, heard: 0, phase: 'loading', meta: null };
-    this.count += 1;
-    if (this.mode === 'guess') { const sub = $('#g-sub'); if (sub) sub.textContent = 'Song ' + this.count; }
-    this.seen.add(item.v);
+    this.round = { item, base, len: base, start: 0, undo: [], tries: 0, phase: 'loading', meta: null };
     this.root.classList.remove('revealed');
     this.fillInfo();
     this.updateClipUI();
     this.setEnabled(false);
-    $('#g-cap').textContent = 'Loading the song…';
+    this.caption('Loading the song…');
     Meta.get(item).then((meta) => { if (this.round && this.round.item === item) { this.round.meta = meta; this.fillInfo(); } });
     try {
       await Player.load();
@@ -409,77 +580,133 @@ const Game = {
       Errors.show(e.message || String(e));
       return;
     }
+    if (this.mode === 'guess') Pool.prefetch();
   },
+  // Load the song muted and let it run until the real song starts, so an ad (if any) plays out silently
+  // and the first clip starts cleanly.
   async preload(item) {
     const myToken = ++this.token;
     const yt = Player.yt;
     yt.mute();
     yt.loadVideoById({ videoId: item.v, startSeconds: 0 });
-    const ok = await Player.waitFor([1], 5000);
+    const started = await Player.waitFor([1], 6000);
     if (myToken !== this.token) return;
+    let ok = started;
+    if (started) {
+      const t0 = Date.now();
+      while (Player.time() < 0.25 && Date.now() - t0 < 60000) {
+        if (Date.now() - t0 > 3500) this.caption('Still loading (an ad may be playing silently)…');
+        await sleep(120);
+        if (myToken !== this.token) return;
+        if (Player.state !== 1 && Player.state !== 3) { try { yt.playVideo(); } catch (e) { /* ignore */ } }
+      }
+    }
     try { yt.pauseVideo(); yt.seekTo(0, true); } catch (e) { /* ignore */ }
+    if (!this.round || this.round.item !== item) return;
     this.round.phase = 'ready';
     this.setEnabled(true);
-    $('#g-cap').textContent = ok ? 'Name that song' : 'Name that song (tap Play clip)';
+    this.caption(ok ? 'Name that song' : 'Name that song (tap Play clip)');
   },
   restoreRound() {
     this.fillInfo();
     this.updateClipUI();
-    if (this.round.phase === 'revealed') { this.root.classList.add('revealed'); return; }
+    if (this.round.phase === 'revealed') {
+      this.root.classList.add('revealed');
+      this.startTicker();
+      return;
+    }
     this.round.phase = 'loading';
     this.setEnabled(false);
-    $('#g-cap').textContent = 'Loading the song…';
+    this.caption('Loading the song…');
     Player.load().then(() => this.preload(this.round.item)).catch((e) => Errors.show(e.message || String(e)));
   },
   fillInfo() {
     const r = this.round;
     if (!r) return;
     const m = r.meta || {};
-    $('#g-title').textContent = r.item.t;
-    $('#g-artist').textContent = r.item.a;
-    $('#g-album').textContent = [m.album, m.year].filter(Boolean).join(' · ');
-    $('#g-note').textContent = r.heard ? `heard at ${fmtSec(r.heard)} · ${r.tries} ${r.tries === 1 ? 'try' : 'tries'}` : 'revealed without a clip';
+    const t = $('#g-title'), a = $('#g-artist'), al = $('#g-album');
+    t.textContent = r.item.t;
+    a.textContent = r.item.a;
+    al.textContent = [m.album, m.year].filter(Boolean).join(' · ');
+    const art = m.art || Meta.fallbackArt(r.item.v);
+    const setCard = (el, kind, o) => { el.dataset.card = kind; Object.entries(o).forEach(([k, v]) => { el.dataset[k] = v || ''; }); };
+    setCard(t, 'song', { artist: r.item.a, title: r.item.t, v: r.item.v, art });
+    setCard(a, 'artist', { name: r.item.a });
+    if (m.album) setCard(al, 'album', { artist: r.item.a, title: m.album, art }); else delete al.dataset.card;
     const back = $('#g-back');
-    if (back) {
-      const art = m.art || Meta.fallbackArt(r.item.v);
-      if (!back.querySelector('img') || back.querySelector('img').dataset.src !== art) {
-        back.innerHTML = `<img alt="Album art" data-src="${esc(art)}" src="${esc(art)}">`;
-        const img = back.querySelector('img');
-        img.onerror = () => { const fb = Meta.fallbackArt(r.item.v); if (img.src !== fb) img.src = fb; else back.innerHTML = '<div class="noart">NO ALBUM ART</div>'; };
-      }
+    const dj = $('#g-djart');
+    const setImg = (box, extra) => {
+      if (!box) return;
+      const img = box.querySelector('img');
+      if (img && img.dataset.src === art) return;
+      box.innerHTML = `<img alt="Album art" data-src="${esc(art)}" src="${esc(art)}">${extra || ''}`;
+      const im = box.querySelector('img');
+      im.onerror = () => { const fb = Meta.fallbackArt(r.item.v); if (im.src !== fb) im.src = fb; else im.remove(); };
+    };
+    setImg(back);
+    if (this.mode === 'dj') {
+      setImg(dj, `<div class="djcap"><b>${esc(r.item.t)}</b><span>${esc(r.item.a)}</span></div>`);
+      const cap = dj.querySelector('.djcap');
+      if (cap) cap.innerHTML = `<b>${esc(r.item.t)}</b><span>${esc(r.item.a)}${m.year ? ' · ' + esc(m.year) : ''}</span>`;
     }
-    if (this.mode === 'dj') this.renderDJInfo();
   },
 
   async playClip() {
     const r = this.round;
     if (!r || r.phase === 'loading' || r.phase === 'revealed') return;
     const yt = Player.yt;
-    clearTimeout(this.clipTimer);
+    this.stopTimers();
     const myToken = ++this.token;
     r.phase = 'playing';
+    const startAt = r.start, len = r.len;
     try {
-      yt.seekTo(r.start, true);
+      if (Math.abs(Player.time() - startAt) > 0.05) yt.seekTo(startAt, true);
       yt.unMute();
       yt.setVolume(100);
       yt.playVideo();
     } catch (e) { Errors.show('Could not play the clip.', e); return; }
+    this.playUI(true, 0);
     const started = await Player.waitFor([1], 2500);
     if (myToken !== this.token) return;
     if (!started) {
       r.phase = 'ready';
+      this.playUI(false);
       if (!this.unlocked) Player.showUnlock();
       else toast('The song is still loading. Try Play clip again.');
       return;
     }
     this.unlocked = true;
-    r.tries += 1;
-    r.heard = r.len;
+    const t0 = performance.now();
+    const step = () => {
+      if (myToken !== this.token) return;
+      this.playUI(true, Math.min(1, (performance.now() - t0) / (len * 1000)));
+      this.raf = requestAnimationFrame(step);
+    };
+    this.raf = requestAnimationFrame(step);
     this.clipTimer = setTimeout(() => {
       if (myToken !== this.token) return;
+      cancelAnimationFrame(this.raf);
       try { yt.pauseVideo(); } catch (e) { /* ignore */ }
+      const reached = Player.time();
       r.phase = 'ready';
-    }, r.len * 1000);
+      this.playUI(false);
+      if (len >= 1 && reached < startAt + len * 0.4) toast('That clip may have been an ad or buffering. Tap Play clip again.');
+      else r.tries += 1;
+      try { yt.seekTo(startAt, true); } catch (e) { /* ignore */ }   // ready for an instant replay
+    }, len * 1000);
+  },
+  playUI(on, p) {
+    const b = $('#g-play'), lbl = $('#g-play-lbl'), prog = $('#g-prog');
+    if (!b) return;
+    if (on && !b.classList.contains('playing')) { b.classList.add('playing'); lbl.innerHTML = EQ + ' Playing'; }
+    if (!on && b.classList.contains('playing')) { b.classList.remove('playing'); lbl.innerHTML = ICON.play + ' Play clip'; }
+    prog.style.transform = `scaleX(${on ? p || 0 : 0})`;
+  },
+  // Keep the player quiet unless the game asked it to play (an ad ending can start the song by itself).
+  onState(s) {
+    const r = this.round;
+    if (!r || s !== 1) return;
+    if (r.phase === 'ready') { try { Player.yt.pauseVideo(); Player.yt.seekTo(r.start, true); } catch (e) { /* ignore */ } }
   },
   moreTime() {
     const r = this.round;
@@ -494,14 +721,16 @@ const Game = {
   setStart(sec) {
     if (!this.round) return;
     this.round.start = Math.max(0, sec);
+    if (this.round.phase === 'ready') { try { Player.yt.seekTo(this.round.start, true); } catch (e) { /* ignore */ } }
     this.updateClipUI();
   },
 
   reveal() {
     const r = this.round;
     if (!r || r.phase === 'revealed') return;
-    clearTimeout(this.clipTimer);
+    this.stopTimers();
     this.token++;
+    this.playUI(false);
     r.phase = 'revealed';
     this.fillInfo();
     this.root.classList.add('revealed');
@@ -511,28 +740,44 @@ const Game = {
       if (!r.tries) yt.seekTo(r.start, true);
       yt.playVideo();
     } catch (e) { /* ignore */ }
+    this.startTicker();
+  },
+  startTicker() {
+    clearInterval(this.ticker);
+    const tick = () => {
+      if (!this.round || this.round.phase !== 'revealed') return;
+      const d = Player.duration(), c = Player.time();
+      const playing = Player.state === 1;
+      if (!this.scrubbing) {
+        $('#g-scrub').value = d ? Math.round((c / d) * 1000) : 0;
+        $('#g-cur').textContent = fmtTime(c);
+      }
+      $('#g-scrub').style.setProperty('--fill', (d ? (c / d) * 100 : 0) + '%');
+      $('#g-dur').textContent = fmtTime(d);
+      $('#g-eq').classList.toggle('on', playing);
+      const pp = $('#g-pp');
+      pp.innerHTML = playing ? ICON.pause : ICON.play;
+      pp.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+    };
+    tick();
+    this.ticker = setInterval(tick, 250);
+  },
+  togglePause() {
+    try { if (Player.state === 1) Player.yt.pauseVideo(); else { Player.yt.unMute(); Player.yt.playVideo(); } } catch (e) { /* ignore */ }
   },
   unreveal() {
     this.root.classList.remove('revealed');
+    this.stopTimers();
     Player.stop();
   },
-  next(isPass) {
-    clearTimeout(this.clipTimer);
+  next() {
+    this.stopTimers();
     this.token++;
     Player.stop();
     const wasRevealed = this.root.classList.contains('revealed');
     this.root.classList.remove('revealed');
     if (this.mode === 'dj') { setTimeout(() => this.showDJPick(), wasRevealed ? 380 : 0); return; }
-    setTimeout(() => this.startRound(this.nextItem()), wasRevealed ? 420 : 0);
-  },
-  neverUse() {
-    const r = this.round;
-    if (!r) return;
-    const list = Store.get('neverUse', []);
-    if (!list.includes(r.item.v)) list.push(r.item.v);
-    Store.set('neverUse', list);
-    toast('This song is kept out of future games');
-    this.next(false);
+    setTimeout(() => this.newRound(), wasRevealed ? 420 : 0);
   },
   onPlayerError(code) {
     // 100 = removed, 101/150 = owner blocks playing outside YouTube, 2/5 = bad id/player problem
@@ -544,10 +789,26 @@ const Game = {
       Store.set('blocked', list);
       toast("That song can't play inside Mixtape. Skipping it.");
       if (this.mode === 'dj') this.showDJPick();
-      else this.startRound(this.nextItem());
+      else this.newRound();
     } else {
       Errors.show('The YouTube player reported a problem (code ' + code + ').');
     }
+  },
+  // Locking the phone mid-guess: drop the player so the lock screen can't show the song.
+  onHide() {
+    const r = this.round;
+    if (!r || r.phase === 'revealed') return;
+    this.stopTimers();
+    this.token++;
+    this.playUI(false);
+    Player.reset();
+    this.unlocked = false;
+    this.needsReload = true;
+  },
+  onShow() {
+    if (!this.needsReload) return;
+    this.needsReload = false;
+    if (this.round && this.round.phase !== 'revealed') this.restoreRound();
   },
 
   /* ---- DJ mode ---- */
@@ -555,23 +816,24 @@ const Game = {
   showDJPick() {
     this.djPicking = true;
     this.round = null;
+    this.stopTimers();
+    this.token++;
     Player.stop();
+    this.root.classList.remove('revealed');
     $('#dj-pick').hidden = false;
     $('#play-area').hidden = true;
     const q = $('#dj-q');
-    if (q) { q.value = ''; }
+    if (q) q.value = '';
     this.renderDJResults('');
   },
   renderDJResults(query) {
     const box = $('#dj-results');
     if (!box) return;
     this.djSeq = (this.djSeq || 0) + 1;
-    const never = new Set(Store.get('neverUse', []));
-    const blocked = new Set(Store.get('blocked', []));
-    const pool = this.items.filter((it) => !never.has(it.v) && !blocked.has(it.v));
+    const pool = Pool.searchable();
     let list;
     if (!pool.length) {
-      box.innerHTML = '<p class="muted">Pick a pool with the bar above, or search all of YouTube.</p>';
+      box.innerHTML = '<p class="muted">Tap Random pick, or type a song and tap Search YouTube.</p>';
       this.djCandidates = [];
       return;
     }
@@ -583,17 +845,32 @@ const Game = {
     }
     this.djCandidates = list;
     box.innerHTML = list.length
-      ? (query ? '' : '<p class="muted" style="margin:4px 0">A few random picks. Type to search.</p>') + list.map((it, i) => resultRow(it, i)).join('')
-      : '<p class="muted">No close matches in this pool.</p>';
+      ? (query ? '' : '<p class="muted small" style="margin:4px 0">A few from your playlists. Type to search.</p>') + list.map((it, i) => resultRow(it, i)).join('')
+      : '<p class="muted">No close matches in your playlists. Tap Search YouTube.</p>';
+  },
+  async djRandom() {
+    const box = $('#dj-results');
+    const seq = this.djSeq = (this.djSeq || 0) + 1;
+    box.innerHTML = '<p class="muted">Finding a song…</p>';
+    try {
+      const item = await Pool.take((t) => { if (seq === this.djSeq) box.innerHTML = `<p class="muted">${esc(t)}</p>`; });
+      if (seq !== this.djSeq) return;
+      if (!item) { box.innerHTML = '<p class="muted">No songs fit this pool. Tap the pool bar to change it.</p>'; return; }
+      this.djChoose(item);
+    } catch (e) {
+      box.innerHTML = '';
+      Errors.show(e.message || String(e), e instanceof ApiError ? '' : e);
+    }
   },
   async djSearchYouTube() {
     const q = ($('#dj-q') || {}).value || '';
-    if (!q.trim()) { toast('Type a song or artist first'); return; }
+    if (!q.trim()) { toast('Type a song or artist first'); $('#dj-q').focus(); return; }
     const box = $('#dj-results');
     clearTimeout(this.djTimer);
     const seq = this.djSeq = (this.djSeq || 0) + 1;
     box.innerHTML = '<p class="muted">Searching YouTube…</p>';
     try {
+      SongFinder.count();
       const list = await YTData.searchSongs(q.trim());
       if (seq !== this.djSeq) return;
       this.djCandidates = list;
@@ -609,19 +886,241 @@ const Game = {
     $('#play-area').hidden = false;
     this.startRound(item);
   },
-  renderDJInfo() {
-    const box = $('#dj-info');
-    if (!box || !this.round) return;
-    const m = this.round.meta || {};
-    box.innerHTML = `Your pick: <b>${esc(this.round.item.t)}</b> · ${esc(this.round.item.a)}${m.year ? ' · ' + esc(m.year) : ''}`;
-  },
   passPhone() {
+    this.stopTimers();
     Player.stop();
     const blank = document.createElement('div');
     blank.className = 'blank';
     blank.innerHTML = `<div class="big">Pass the phone</div><p class="muted">Hand it to the next DJ.</p><button class="btn big primary" style="min-width:220px">I'm the DJ</button>`;
     document.body.appendChild(blank);
-    blank.querySelector('button').onclick = () => { blank.remove(); this.root.classList.remove('revealed'); this.showDJPick(); };
+    blank.querySelector('button').onclick = () => { blank.remove(); this.showDJPick(); };
+  },
+
+  /* ---- song pool sheet ---- */
+  openPools(onDone) {
+    const draft = JSON.parse(JSON.stringify(Pool.get()));
+    const before = JSON.stringify(draft);
+    let addedPlaylist = false;
+    Sheets.open({
+      title: 'Song pool',
+      html: `<p class="muted small" style="margin-top:0">Picks narrow each other: a playlist plus 90s plays that playlist's 90s songs. Several in one row widen it (70s + 90s). Nothing picked plays popular songs from any era.</p>
+        <div class="now" data-now></div>
+        <h3>Playlists</h3><div data-pl></div>
+        <details class="add-pl"><summary>Add a YouTube Music playlist</summary>
+          <input class="field" data-x="link" placeholder="Paste the playlist link" autocomplete="off" autocapitalize="off" spellcheck="false">
+          <div class="row" style="margin-top:8px"><button class="btn small primary" data-x="add">Add playlist</button><button class="link-btn" data-x="how">How to get the link</button></div>
+          <p class="muted small" data-x="status"></p>
+        </details>
+        <h3>Artists</h3>
+        <input class="field" data-x="asearch" placeholder="Search for an artist" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <div class="ares" data-ares></div>
+        <div class="chips" data-achips></div>
+        <h3>Genres</h3><div class="chips" data-genres></div>
+        <div class="row" style="margin-top:8px"><input class="field" data-x="gother" placeholder="Another genre (any Last.fm tag)" autocomplete="off" autocapitalize="off" spellcheck="false"><button class="btn small" data-x="gadd">Add</button></div>
+        <h3>Decades</h3><div class="chips" data-decades></div>
+        <h3>Hits or deep cuts</h3><div class="hits" data-hits></div><p class="muted small" data-hitsnote></p>
+        <div class="row sheet-actions"><button class="btn" data-x="clear">Clear all</button><button class="btn primary" style="flex:1" data-x="done">Done</button></div>`,
+      onMount: (body, close) => {
+        const $b = (s) => body.querySelector(s);
+        const status = (t) => { $b('[data-x=status]').textContent = t; };
+        const renderNow = () => { $b('[data-now]').innerHTML = `Plays: <b>${esc(Pool.label(draft))}</b>`; };
+        const renderPl = () => {
+          const pools = Store.get('pools', []);
+          $b('[data-pl]').innerHTML = pools.map((p) => `<div class="pool-item">
+            <button class="check ${draft.playlists.includes(p.id) ? 'on' : ''}" data-x="pl" data-id="${esc(p.id)}" aria-pressed="${draft.playlists.includes(p.id)}"><span class="box">${ICON.check}</span>
+              <span class="main"><span class="n">${esc(p.name)}</span><span class="c">${p.count} songs · updated ${esc((p.updated || '').slice(0, 10))}</span></span></button>
+            <button class="btn small" data-x="refresh" data-id="${esc(p.id)}">Refresh</button>
+            <button class="icon-btn" data-x="remove" data-id="${esc(p.id)}" aria-label="Remove ${esc(p.name)}">${ICON.close}</button></div>`).join('')
+            || '<p class="muted small">No playlists yet.</p>';
+        };
+        const renderArtists = () => {
+          $b('[data-achips]').innerHTML = draft.artists.map((a, i) => `<span class="chip on art">
+            <button data-x="albums" data-i="${i}">${esc(a.name)}<small>${a.albums && a.albums.length ? ` · ${a.albums.length} album${a.albums.length === 1 ? '' : 's'}` : ' · all songs'}</small></button>
+            <button data-x="adel" data-i="${i}" aria-label="Remove ${esc(a.name)}">${ICON.close}</button></span>`).join('')
+            + (draft.artists.length ? '<p class="muted small" style="flex-basis:100%;margin:2px 0 0">Tap an artist to pick albums.</p>' : '');
+        };
+        const renderGenres = () => {
+          const all = GENRES.concat(draft.genres.filter((g) => !GENRES.includes(g)));
+          $b('[data-genres]').innerHTML = all.map((g) => `<button class="chip ${draft.genres.includes(g) ? 'on' : ''}" data-x="genre" data-v="${esc(g)}">${esc(g)}</button>`).join('')
+            + (draft.artists.length && draft.genres.length && !draft.playlists.length ? '<p class="muted small" style="flex-basis:100%;margin:2px 0 0">Genres are skipped while artists are picked.</p>' : '');
+        };
+        const renderDecades = () => {
+          $b('[data-decades]').innerHTML = Object.keys(DEC).map((d) => `<button class="chip ${draft.decades.includes(d) ? 'on' : ''}" data-x="decade" data-v="${d}">${d}</button>`).join('');
+        };
+        const renderHits = () => {
+          const h = draft.hits;
+          $b('[data-hits]').innerHTML = `<button class="${h ? '' : 'on'}" data-x="hany">Any</button>` + BANDS.map((n, i) => `<button class="${h && i >= h[0] && i <= h[1] ? 'on' : ''}" data-x="hit" data-i="${i}">${n}</button>`).join('');
+          $b('[data-hitsnote]').textContent = h
+            ? `${this.hitsNote(h)} Big hits are an artist's top 10 on Last.fm; deep cuts and rarities are songs far fewer people play. Tap more steps to widen the range.`
+            : 'Any: playlists play every song, artists play their hits through album tracks, and genres and decades play their best-known songs.';
+        };
+        const all = () => { renderNow(); renderPl(); renderArtists(); renderGenres(); renderDecades(); renderHits(); };
+        all();
+
+        const fetchPool = async (id, existingName) => {
+          status('Reading the playlist…');
+          const name = existingName || await YTData.playlistName(id);
+          const items = await YTData.playlistItems(id, (n, total) => status(`Reading the playlist… ${n}${total ? ' of ' + total : ''} songs`));
+          if (!items.length) throw new ApiError('That playlist has no playable songs.');
+          Store.set('pool.' + id, items);
+          const pools = Store.get('pools', []).filter((p) => p.id !== id);
+          pools.push({ id, name, count: items.length, updated: new Date().toISOString() });
+          Store.set('pools', pools);
+          SongFinder.forget();
+          status('');
+          return { name, count: items.length };
+        };
+
+        // Artist search (Last.fm, close matches as you type)
+        let aTimer = null, aSeq = 0, aList = [];
+        const asearch = $b('[data-x=asearch]');
+        asearch.addEventListener('input', () => {
+          clearTimeout(aTimer);
+          const q = asearch.value.trim();
+          if (!q) { $b('[data-ares]').innerHTML = ''; return; }
+          aTimer = setTimeout(async () => {
+            const seq = ++aSeq;
+            try {
+              const list = await LastFM.searchArtists(q);
+              if (seq !== aSeq) return;
+              aList = list.slice(0, 6);
+              $b('[data-ares]').innerHTML = aList.map((a, i) => `<button class="rowbtn" data-x="apick" data-i="${i}"><span>${esc(a.name)}</span><span class="muted small">${a.listeners ? Math.round(a.listeners / 1000).toLocaleString() + 'k listeners' : ''}</span></button>`).join('')
+                || '<p class="muted small">No artists found.</p>';
+            } catch (e) {
+              $b('[data-ares]').innerHTML = '';
+              Errors.show(e.message || String(e));
+            }
+          }, 280);
+        });
+
+        body.addEventListener('click', async (e) => {
+          const b = e.target.closest('[data-x]');
+          if (!b) return;
+          const x = b.dataset.x;
+          try {
+            if (x === 'how') showHelp('pools');
+            if (x === 'pl') { const id = b.dataset.id; draft.playlists = draft.playlists.includes(id) ? draft.playlists.filter((p) => p !== id) : draft.playlists.concat(id); renderPl(); renderNow(); renderGenres(); }
+            if (x === 'remove') {
+              const pool = Store.get('pools', []).find((p) => p.id === b.dataset.id);
+              if (pool && confirm(`Remove "${pool.name}" from Mixtape? (It stays in YouTube Music.)`)) {
+                Store.set('pools', Store.get('pools', []).filter((p) => p.id !== pool.id));
+                Store.del('pool.' + pool.id);
+                draft.playlists = draft.playlists.filter((p) => p !== pool.id);
+                SongFinder.forget();
+                addedPlaylist = true;
+                renderPl(); renderNow();
+              }
+            }
+            if (x === 'refresh') {
+              b.disabled = true;
+              const pool = Store.get('pools', []).find((p) => p.id === b.dataset.id);
+              const r = await fetchPool(b.dataset.id, pool && pool.name);
+              addedPlaylist = true;
+              renderPl();
+              toast(`${r.name}: ${r.count} songs`);
+            }
+            if (x === 'add') {
+              const id = YTData.parsePlaylistId($b('[data-x=link]').value);
+              if (!id) { status("That doesn't look like a playlist link. In YouTube Music: playlist → ⋯ → Share → Copy link."); return; }
+              b.disabled = true;
+              const r = await fetchPool(id);
+              b.disabled = false;
+              $b('[data-x=link]').value = '';
+              if (!draft.playlists.includes(id)) draft.playlists.push(id);
+              addedPlaylist = true;
+              renderPl(); renderNow();
+              toast(`Added ${r.name}: ${r.count} songs`);
+            }
+            if (x === 'apick') {
+              const a = aList[parseInt(b.dataset.i, 10)];
+              if (a && !draft.artists.some((y) => norm(y.name) === norm(a.name))) draft.artists.push({ name: a.name, mbid: a.mbid, albums: [] });
+              asearch.value = '';
+              $b('[data-ares]').innerHTML = '';
+              renderArtists(); renderNow(); renderGenres();
+            }
+            if (x === 'adel') { draft.artists.splice(parseInt(b.dataset.i, 10), 1); renderArtists(); renderNow(); renderGenres(); }
+            if (x === 'albums') {
+              const art = draft.artists[parseInt(b.dataset.i, 10)];
+              if (art) this.albumPicker(art, () => { renderArtists(); renderNow(); });
+            }
+            if (x === 'genre') { const v = b.dataset.v; draft.genres = draft.genres.includes(v) ? draft.genres.filter((g) => g !== v) : draft.genres.concat(v); renderGenres(); renderNow(); }
+            if (x === 'gadd') {
+              const inp = $b('[data-x=gother]');
+              const v = inp.value.trim().toLowerCase();
+              if (v && !draft.genres.includes(v)) draft.genres.push(v);
+              inp.value = '';
+              renderGenres(); renderNow();
+            }
+            if (x === 'decade') { const v = b.dataset.v; draft.decades = draft.decades.includes(v) ? draft.decades.filter((g) => g !== v) : draft.decades.concat(v); renderDecades(); renderNow(); }
+            if (x === 'hany') { draft.hits = null; renderHits(); renderNow(); }
+            if (x === 'hit') {
+              const i = parseInt(b.dataset.i, 10), h = draft.hits;
+              if (!h) draft.hits = [i, i];
+              else if (i < h[0]) draft.hits = [i, h[1]];
+              else if (i > h[1]) draft.hits = [h[0], i];
+              else if (h[0] === h[1]) draft.hits = null;
+              else if (i === h[0]) draft.hits = [h[0] + 1, h[1]];
+              else if (i === h[1]) draft.hits = [h[0], h[1] - 1];
+              else draft.hits = [i, i];
+              renderHits(); renderNow();
+            }
+            if (x === 'clear') { Object.assign(draft, Pool.defaults()); all(); }
+            if (x === 'done') close();
+          } catch (err) {
+            b.disabled = false;
+            status('');
+            Errors.show(err.message || String(err), err instanceof ApiError ? '' : err);
+          }
+        });
+      },
+      onClose: () => {
+        if (JSON.stringify(draft) !== before || addedPlaylist) {
+          Pool.set(draft);
+          if (onDone) onDone();
+        }
+      },
+    });
+  },
+  hitsNote(h) { return h[0] === h[1] ? `${BANDS[h[0]]} only.` : `${BANDS[h[0]]} through ${BANDS[h[1]].toLowerCase()}.`; },
+  albumPicker(art, onSave) {
+    const chosen = new Set((art.albums || []).map((a) => a.id));
+    let albums = [];
+    Sheets.open({
+      title: art.name,
+      html: `<p class="muted small" style="margin-top:0">Pick albums to narrow the game to them. None picked plays all of ${esc(art.name)}'s songs.</p>
+        <div class="row" style="gap:16px"><button class="link-btn" data-y="all">Select all</button><button class="link-btn" data-y="none">Select none</button></div>
+        <div data-list><p class="muted">Loading albums…</p></div>
+        <div class="row sheet-actions"><button class="btn primary wide" data-y="save">Save</button></div>`,
+      onMount: async (body, close) => {
+        const list = body.querySelector('[data-list]');
+        const render = () => {
+          list.innerHTML = albums.length ? albums.map((a) => `<button class="check ${chosen.has(a.id) ? 'on' : ''}" data-y="t" data-id="${esc(a.id)}"><span class="box">${ICON.check}</span>
+            <span class="cvs"><img src="https://coverartarchive.org/release-group/${esc(a.id)}/front-250" alt="" loading="lazy" onerror="this.remove()"></span>
+            <span class="main"><span class="n">${esc(a.title)}</span><span class="c">${a.year || ''}</span></span></button>`).join('') : '<p class="muted">No studio albums found for this artist.</p>';
+        };
+        body.addEventListener('click', (e) => {
+          const b = e.target.closest('[data-y]');
+          if (!b) return;
+          const y = b.dataset.y;
+          if (y === 't') { const id = b.dataset.id; if (chosen.has(id)) chosen.delete(id); else chosen.add(id); render(); }
+          if (y === 'all') { albums.forEach((a) => chosen.add(a.id)); render(); }
+          if (y === 'none') { chosen.clear(); render(); }
+          if (y === 'save') {
+            art.albums = albums.filter((a) => chosen.has(a.id)).map((a) => ({ id: a.id, title: a.title, year: a.year }));
+            close();
+            onSave();
+          }
+        });
+        try {
+          let id = art.mbid;
+          if (!id) { const f = await MB.findArtist(art.name); id = f && f.id; if (id) art.mbid = id; }
+          albums = id ? await MB.albums(id) : [];
+          render();
+        } catch (e) {
+          list.innerHTML = `<p class="muted">Couldn't load albums. ${esc(e.message || '')}</p>`;
+        }
+      },
+    });
   },
 };
 
@@ -641,3 +1140,7 @@ Views.game = {
   mount: (root) => Game.mount(root),
   leave: () => Game.leave(),
 };
+document.addEventListener('visibilitychange', () => {
+  if (currentView !== Views.game) return;
+  if (document.visibilityState === 'hidden') Game.onHide(); else Game.onShow();
+});

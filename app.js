@@ -2,14 +2,15 @@
 
 // =====================================================================
 //  YOUR KEYS — this is the only block you ever need to edit.
-//  Paste your YouTube Data API key between the quotes.
+//  Paste each key between its quotes.
 // =====================================================================
 const CONFIG = {
   YOUTUBE_API_KEY: 'AIzaSyDz0tlqHQZU8WFEoCWcc6w4VnK01l9sZYY',
+  LASTFM_API_KEY: 'PASTE-YOUR-LASTFM-KEY-HERE',
 };
 // =====================================================================
 
-const APP_VERSION = '1.0';
+const APP_VERSION = '2.0';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -199,7 +200,7 @@ function toast(msg) {
 
 const Sheets = {
   stack: [],
-  open({ title, html, onMount, onClose }) {
+  open({ title, html, onMount, onClose, card }) {
     const root = $('#sheet-root');
     const back = document.createElement('div');
     back.className = 'sheet-backdrop';
@@ -209,7 +210,8 @@ const Sheets = {
     sheet.setAttribute('aria-label', title || 'Panel');
     sheet.innerHTML = `<div class="grab"></div>
       <div class="sheet-top"><h2>${esc(title || '')}</h2>
-      <button class="icon-btn" data-x="close" aria-label="Close">${ICON.close}</button></div>
+      <span class="row" style="gap:6px; align-items:center"><button class="btn small ghost closeall" data-x="closeall" hidden>Close all</button>
+      <button class="icon-btn" data-x="close" aria-label="Close">${ICON.close}</button></span></div>
       <div class="sheet-body">${html}</div>`;
     root.appendChild(back);
     root.appendChild(sheet);
@@ -218,6 +220,8 @@ const Sheets = {
     const close = () => this.close(entry);
     back.onclick = close;
     sheet.querySelector('[data-x=close]').onclick = close;
+    sheet.querySelector('[data-x=closeall]').onclick = () => this.closeAll();
+    this.refresh();
     requestAnimationFrame(() => { back.classList.add('open'); sheet.classList.add('open'); });
     if (onMount) onMount(sheet.querySelector('.sheet-body'), close);
     return close;
@@ -229,9 +233,11 @@ const Sheets = {
     entry.back.classList.remove('open');
     entry.sheet.classList.remove('open');
     setTimeout(() => { entry.back.remove(); entry.sheet.remove(); }, 320);
+    this.refresh();
     if (entry.onClose) entry.onClose();
   },
-  closeAll() { [...this.stack].forEach((e) => this.close(e)); },
+  closeAll() { [...this.stack].reverse().forEach((e) => this.close(e)); },
+  refresh() { this.stack.forEach((e) => { const b = e.sheet.querySelector('[data-x=closeall]'); if (b) b.hidden = this.stack.length < 2; }); },
 };
 
 const HELP = {
@@ -244,27 +250,27 @@ const HELP = {
   },
   game: {
     title: 'Guess the Intro',
-    html: `<ol><li><b>Pick a pool</b> with the bar under the title: any YouTube Music playlist (public or unlisted).</li>
-      <li>Set the <b>clip length</b> with the slider or − / +. The short end is stretched out so tiny clips are easy to pick.</li>
-      <li><b>Play clip</b> plays the very start of a random song. Tap it again to hear the same clip again.</li>
+    html: `<ol><li><b>Pick the pool</b> with the bar next to Guess / DJ: playlists, artists (and their albums), genres, decades, and hits or deep cuts. Nothing picked plays popular songs.</li>
+      <li>Set the <b>clip length</b> with the slider or − / +. The left half is 0.1 to 1 second, the right half 1 to 60 seconds.</li>
+      <li><b>Play clip</b> plays the very start of the song; the button fills up while it plays. Tap it again to hear the same clip again.</li>
       <li><b>More time</b> adds the starting length once per tap.</li>
-      <li><b>Skip silence</b>: if a clip was silent, the next try starts where it ended. <b>Undo</b>, <b>−0.25 s</b> and <b>0:00</b> step back. Nothing is saved, so the next game starts at 0:00 again.</li>
-      <li><b>Reveal</b> flips the card and plays the rest of the song.</li>
-      <li><b>Pass</b> moves on without revealing. <b>Never use</b> (after reveal) keeps a song out of future games.</li></ol>
-      <h3>DJ Mode</h3><p>Switch to DJ at the top. The DJ picks a song (search the pool, or all of YouTube), plays clips for everyone, then reveals. <b>Pass the phone</b> blanks the screen for the next DJ.</p>`,
+      <li><b>Skip silence</b>: if a clip was silent, the next try starts where it ended. <b>Undo</b>, <b>−0.25 s</b> and <b>0:00</b> step back. Nothing is saved.</li>
+      <li><b>Reveal</b> flips the card and plays the rest of the song, with pause and a scrub bar. Tap the song, artist or album for its info card. <b>Next song</b> moves on.</li></ol>
+      <h3>DJ Mode</h3><p>Switch to DJ at the top. The DJ taps <b>Random pick</b> (from the pool), searches your playlists, or searches all of YouTube. The album art and song stay on screen for the DJ. <b>Pass the phone</b> blanks the screen for the next DJ.</p>
+      <h3>Locking the phone</h3><p>If the phone locks before Reveal, Mixtape drops the song so the lock screen can't give it away, and reloads it when you come back.</p>`,
   },
   pools: {
-    title: 'Song pools',
-    html: `<p>A pool is the set of songs the game picks from. For now a pool is a YouTube Music playlist.</p>
-      <ol><li>In YouTube Music, open the playlist → <b>⋯</b> → <b>Edit playlist</b> → set <b>Privacy</b> to <b>Unlisted</b> (or Public).</li>
+    title: 'Adding a playlist',
+    html: `<ol><li>In YouTube Music, open the playlist → <b>⋯</b> → <b>Edit playlist</b> → set <b>Privacy</b> to <b>Unlisted</b> (or Public).</li>
       <li>Tap <b>⋯</b> → <b>Share</b> → <b>Copy link</b>.</li>
-      <li>Paste the link here and tap <b>Add</b>.</li></ol>
-      <p>Mixtape saves the song list on this phone. Tap <b>Refresh</b> after you change the playlist. Genre, decade, artist and hits-vs-deep-cuts filters come in the next update.</p>`,
+      <li>Paste the link in Song pool → Add a YouTube Music playlist.</li></ol>
+      <p>Mixtape saves the song list on this phone. Tap <b>Refresh</b> after you change the playlist.</p>`,
   },
   settings: {
     title: 'Settings',
     html: `<ul><li><b>Appearance</b>: pick any accent and background color. Text adjusts to stay readable. Reset goes back to black and orange.</li>
       <li><b>Keep screen on</b>: the phone won't dim while Mixtape is open.</li>
+      <li><b>Song lookups</b>: songs that come from artists, genres or decades are matched to YouTube once (100 a day) and then remembered.</li>
       <li><b>Backup</b>: saves everything on this phone to one file you can load later. Sync with a code comes with the next update.</li></ul>`,
   },
 };
@@ -287,13 +293,17 @@ const ICON = {
   chev: '<svg viewBox="0 0 10 16" width="10" height="16" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M2 2l6 6-6 6"/></svg>',
   gear: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"/></svg>',
   play: '<svg viewBox="0 0 12 14" width="13" height="15" aria-hidden="true"><path d="M1 1l10 6-10 6z" fill="currentColor"/></svg>',
-  tape: '<svg viewBox="0 0 30 22" width="30" height="22" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="1" y="1" width="28" height="20" rx="3"/><circle cx="9" cy="10" r="3"/><circle cx="21" cy="10" r="3"/><path d="M6 21l3-5h12l3 5"/></svg>',
+  tape: '<svg viewBox="0 0 30 22" width="30" height="22" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round" aria-hidden="true"><rect x="1" y="1" width="28" height="20" rx="3"/><circle cx="9" cy="9.5" r="2.6"/><circle cx="21" cy="9.5" r="2.6"/><path d="M7.4 20L9.8 16H20.2L22.6 20"/></svg>',
   notes: '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M9 18V5l12-2v13"/><circle cx="6" cy="18" r="3"/><circle cx="18" cy="16" r="3"/></svg>',
   list: '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 6h13M3 12h13M3 18h8"/><path d="M19 15v6M16 18h6"/></svg>',
   pin: '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M12 21s-7-6.2-7-11a7 7 0 0 1 14 0c0 4.8-7 11-7 11z"/><circle cx="12" cy="10" r="2.5"/></svg>',
   diary: '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" aria-hidden="true"><rect x="4" y="3" width="16" height="18" rx="2"/><path d="M8 8h8M8 12h8M8 16h5"/></svg>',
   people: '<svg viewBox="0 0 24 24" fill="none" stroke-width="2" stroke-linecap="round" aria-hidden="true" class="ic"><circle cx="9" cy="8" r="3.5"/><path d="M2.5 20c.8-3.6 3.4-5.5 6.5-5.5s5.7 1.9 6.5 5.5"/><path d="M16 4.5a3.5 3.5 0 0 1 0 7M18.5 14.8c1.6.8 2.7 2.5 3 5.2"/></svg>',
   restart: '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 3v5h5"/></svg>',
+  pause: '<svg viewBox="0 0 14 14" width="16" height="16" aria-hidden="true"><path d="M3 1.5h2.6v11H3zM8.4 1.5H11v11H8.4z" fill="currentColor"/></svg>',
+  filter: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M4 6h10M18 6h2M4 12h4M12 12h8M4 18h12M20 18h0"/><circle cx="16" cy="6" r="2"/><circle cx="10" cy="12" r="2"/><circle cx="18" cy="18" r="2"/></svg>',
+  dice: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3.5" y="3.5" width="17" height="17" rx="4"/><circle cx="8.5" cy="8.5" r="1.2" fill="currentColor"/><circle cx="15.5" cy="15.5" r="1.2" fill="currentColor"/><circle cx="12" cy="12" r="1.2" fill="currentColor"/></svg>',
+  check: '<svg viewBox="0 0 14 14" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2.5 7.5l3 3 6-7"/></svg>',
   out: '<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" aria-hidden="true"><path d="M14 4h6v6"/><path d="M20 4l-9 9"/><path d="M18 14v5a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V7a1 1 0 0 1 1-1h5"/></svg>',
 };
 
@@ -413,18 +423,21 @@ const Meta = {
     try {
       const params = new URLSearchParams({ term: `${item.a} ${item.t}`.slice(0, 120), entity: 'song', media: 'music', limit: '10' });
       const data = await jsonp('https://itunes.apple.com/search?' + params.toString());
-      let best = null, bestScore = 0;
+      let best = null, bestScore = 0, year = '';
       (data.results || []).forEach((r) => {
         const s = sim(item.t, r.trackName) * 0.6 + sim(item.a, r.artistName) * 0.4;
         if (s > bestScore) { bestScore = s; best = r; }
+        const y = String(r.releaseDate || '').slice(0, 4);
+        if (s >= 0.8 && y && (!year || y < year)) year = y;   // earliest release, not the remaster
       });
       if (best && bestScore >= 0.7) {
         found = {
           album: String(best.collectionName || '').replace(/\s*-\s*(Single|EP)$/i, ''),
-          year: String(best.releaseDate || '').slice(0, 4),
+          year: year || String(best.releaseDate || '').slice(0, 4),
           art: String(best.artworkUrl100 || '').replace(/100x100bb/, '600x600bb'),
         };
       }
+      if (typeof Year !== 'undefined') { const y = Year.known(item.a, item.t); if (found && y) found.year = String(y); }
     } catch (e) { /* lookups are best-effort */ }
     const meta = found || { album: '', year: '', art: '' };
     if (!meta.art) meta.art = this.fallbackArt(item.v);
@@ -444,16 +457,38 @@ function route() {
   if (currentView && currentView.leave) currentView.leave();
   Sheets.closeAll();
   currentView = view;
+  document.body.classList.toggle('locked', view === Views.game);
   $('#app').innerHTML = view.html();
   if (view.mount) view.mount($('#app'));
   window.scrollTo(0, 0);
 }
 window.addEventListener('hashchange', route);
+// The game screen never moves: block page swipes except inside lists, panels and sliders.
+document.addEventListener('touchmove', (e) => {
+  if (!document.body.classList.contains('locked')) return;
+  if (e.target.closest && e.target.closest('.sheet, .results, input[type=range], .yt-wrap.unlock')) return;
+  e.preventDefault();
+}, { passive: false });
+
+/* ---------------- Open a song in the YouTube Music app ---------------- */
+// Tries the app first; if the app doesn't open within a moment, opens the web page instead.
+function openYTMusic(videoId, query) {
+  const web = videoId ? 'https://music.youtube.com/watch?v=' + encodeURIComponent(videoId) : 'https://music.youtube.com/search?q=' + encodeURIComponent(query || '');
+  const app = videoId ? 'youtubemusic://watch?v=' + encodeURIComponent(videoId) : 'youtubemusic://search?q=' + encodeURIComponent(query || '');
+  let left = false;
+  const onHide = () => { if (document.visibilityState === 'hidden') left = true; };
+  document.addEventListener('visibilitychange', onHide);
+  setTimeout(() => {
+    document.removeEventListener('visibilitychange', onHide);
+    if (!left) window.open(web, '_blank');
+  }, 1500);
+  location.href = app;
+}
 
 /* ---------------- Home ---------------- */
 Views.home = {
   html() {
-    const pool = (typeof Game !== 'undefined' && Game.poolLabel) ? Game.poolLabel() : 'Pick a playlist';
+    const pool = (typeof Pool !== 'undefined') ? Pool.label() : 'Popular songs';
     const clip = STOPS[Settings.get().clipIndex] || 0.5;
     return `<div class="screen">
       <header class="topbar">
@@ -490,7 +525,7 @@ Views.home = {
     }
   },
   mount(root) {
-    root.addEventListener('click', (e) => {
+    root.firstElementChild.addEventListener('click', (e) => {
       const b = e.target.closest('[data-a]');
       if (!b) return;
       const a = b.dataset.a;
@@ -507,8 +542,9 @@ Views.home = {
 Views.settings = {
   html() {
     const s = Settings.get();
-    const never = Store.get('neverUse', []);
     const pools = Store.get('pools', []);
+    const used = typeof SongFinder !== 'undefined' ? SongFinder.used() : 0;
+    const remembered = Object.values(Store.get('songs', {})).filter(Boolean).length;
     return `<div class="screen">
       <header class="topbar">
         <button class="icon-btn" data-a="home" aria-label="Back">${ICON.back}</button>
@@ -524,10 +560,10 @@ Views.settings = {
 
       <div class="list-h">Game</div>
       <div class="list">
-        <div class="li"><span>Song pools<div class="sub">${pools.length} saved playlist${pools.length === 1 ? '' : 's'}</div></span>
-          <button class="btn small" data-a="pools">Manage</button></div>
-        <div class="li"><span>"Never use" songs<div class="sub">${never.length} kept out of games</div></span>
-          <button class="btn small" data-a="clearNever" ${never.length ? '' : 'disabled'}>Clear</button></div>
+        <div class="li"><span>Song pool<div class="sub">${esc(typeof Pool !== 'undefined' ? Pool.label() : '')} · ${pools.length} saved playlist${pools.length === 1 ? '' : 's'}</div></span>
+          <button class="btn small" data-a="pools">Change</button></div>
+        <div class="li"><span>Song lookups today<div class="sub">${used} of 100 used · ${remembered} songs remembered</div></span></div>
+        <div class="li"><span>Last.fm key<div class="sub">${typeof LastFM !== 'undefined' && LastFM.ready() ? 'Added' : 'Not added yet (top of app.js)'}</div></span></div>
       </div>
 
       <div class="list-h">Saving</div>
@@ -554,6 +590,7 @@ Views.settings = {
     </div>`;
   },
   mount(root) {
+    root = root.firstElementChild;
     root.addEventListener('click', (e) => {
       const b = e.target.closest('[data-a]');
       if (!b) return;
@@ -561,7 +598,6 @@ Views.settings = {
       if (a === 'home') go('#home');
       if (a === 'help') showHelp('settings');
       if (a === 'pools') Game.openPools(() => route());
-      if (a === 'clearNever') { if (confirm('Let every "Never use" song back into games?')) { Store.set('neverUse', []); route(); } }
       if (a === 'export') Backup.export();
       if (a === 'import') $('#import-file').click();
       if (a === 'resetColors') { Settings.set({ accent: DEFAULTS.accent, bg: DEFAULTS.bg }); applyTheme(); route(); }
