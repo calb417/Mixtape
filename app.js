@@ -10,7 +10,7 @@ const CONFIG = {
 };
 // =====================================================================
 
-const APP_VERSION = '2.2';
+const APP_VERSION = '2.3';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -579,6 +579,8 @@ Views.settings = {
         <div class="li"><span>Song pool<div class="sub">${esc(typeof Pool !== 'undefined' ? Pool.label() : '')} · ${pools.length} saved playlist${pools.length === 1 ? '' : 's'}</div></span>
           <button class="btn small" data-a="pools">Change</button></div>
         <div class="li"><span>Song lookups today<div class="sub">${used} of 100 used · ${remembered} songs remembered</div></span></div>
+        <div class="li"><span>Player log<div class="sub">What YouTube reported during the last few songs. Screenshot it for Claude if ads get through.</div></span>
+          <button class="btn small" data-a="playerlog">View</button></div>
         <div class="li"><span>Last.fm key<div class="sub">${typeof LastFM !== 'undefined' && LastFM.ready() ? 'Added' : 'Not added yet (top of app.js)'}</div></span></div>
       </div>
 
@@ -617,6 +619,16 @@ Views.settings = {
       if (a === 'export') Backup.export();
       if (a === 'import') $('#import-file').click();
       if (a === 'resetColors') { Settings.set({ accent: DEFAULTS.accent, bg: DEFAULTS.bg }); applyTheme(); route(); }
+      if (a === 'playerlog') {
+        const log = (Player.logList || Store.get('playerlog', [])).slice(-120);
+        Sheets.open({ title: 'Player log', html: log.length ? `<p class="muted small" style="margin-top:0">Newest at the bottom. Each line: time, event, player state, position, length, video, sound.</p><pre class="plog">${esc(log.join('\n'))}</pre><button class="btn small" data-x="clearplog">Clear log</button>` : '<p>Nothing logged yet. Play a few songs first.</p>',
+          onMount(body, close) {
+            const pre = body.querySelector('.plog');
+            if (pre) setTimeout(() => { body.parentElement.scrollTop = body.parentElement.scrollHeight; }, 50);
+            const c = body.querySelector('[data-x=clearplog]');
+            if (c) c.onclick = () => { Player.logList = []; Store.set('playerlog', []); close(); };
+          } });
+      }
       if (a === 'errors') {
         const log = Store.get('errorlog', []).slice().reverse();
         Sheets.open({ title: 'Error log', html: log.length ? log.map((l) => `<p class="mono" style="font-size:12px">${esc(l.at)}<br>${esc(l.text)}<br>${esc(l.extra || '')}</p>`).join('') + '<button class="btn small" data-x="clearlog">Clear log</button>' : '<p>No errors saved.</p>',
