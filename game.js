@@ -11,7 +11,16 @@ const Player = {
   load() {
     if (this.loading) return this.loading;
     this.loading = new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('The YouTube player took too long to load. Check the connection and try again.')), 20000);
+      let waited = 0, retried = false, done = false;
+      const finish = (err) => { if (done) return; done = true; clearInterval(watch); if (err) reject(err); else resolve(); };
+      // Only count seconds while Mixtape is on screen (iPhone pauses the player in the background),
+      // and quietly rebuild the player once before giving up.
+      const watch = setInterval(() => {
+        if (document.visibilityState !== 'visible') return;
+        waited += 1;
+        if (waited === 12 && !retried && window.YT && window.YT.Player) { retried = true; this.teardown(); create(); }
+        if (waited >= 30) finish(new Error('The YouTube player took too long to load. Check the connection, then tap Play clip or pick again.'));
+      }, 1000);
       const create = () => {
         if (!document.getElementById('yt-player')) {
           const d = document.createElement('div');
@@ -23,7 +32,7 @@ const Player = {
           height: 170,
           playerVars: { playsinline: 1, controls: 1, rel: 0, modestbranding: 1, origin: location.origin },
           events: {
-            onReady: () => { clearTimeout(timer); resolve(); },
+            onReady: () => finish(),
             onStateChange: (e) => {
               this.state = e.data;
               if (e.data === 1 && $('#yt-wrap').classList.contains('unlock')) this.finishUnlock();
@@ -37,10 +46,10 @@ const Player = {
       window.onYouTubeIframeAPIReady = create;
       const s = document.createElement('script');
       s.src = 'https://www.youtube.com/iframe_api';
-      s.onerror = () => { clearTimeout(timer); reject(new Error('Could not load the YouTube player. Check the connection.')); };
+      s.onerror = () => finish(new Error('Could not load the YouTube player. Check the connection.'));
       document.head.appendChild(s);
     });
-    this.loading.catch(() => { this.loading = null; });
+    this.loading.catch(() => { this.loading = null; this.teardown(); });
     return this.loading;
   },
   waitFor(states, ms) {
@@ -65,11 +74,14 @@ const Player = {
   stop() { try { if (this.yt) this.yt.pauseVideo(); } catch (e) { /* ignore */ } },
   // Throw the player away, so the lock screen and Now Playing have nothing to show.
   reset() {
+    this.teardown();
+    this.loading = null;
+  },
+  teardown() {
     try { if (this.yt) { this.yt.stopVideo(); this.yt.destroy(); } } catch (e) { /* ignore */ }
     const old = document.getElementById('yt-player');
     if (old && old.tagName === 'IFRAME') old.remove();
     this.yt = null;
-    this.loading = null;
     this.state = -1;
   },
 };
@@ -263,6 +275,22 @@ const Pool = {
       if (item) { this.seen.add(songKey(item.a, item.t)); this.seen.add(item.v); return item; }
     }
   },
+  // A handful of songs from the pool to show the DJ (not yet checked against decades or YouTube)
+  async sample(n = 30) {
+    const f = this.get(), mode = this.mode(f), gen = this.gen;
+    if (mode !== 'P' && !LastFM.ready()) throw new ApiError('No Last.fm key yet. Open app.js on GitHub and paste your Last.fm key in the marked spot at the top.');
+    if (!this.building) { this.building = this.build(f, mode, () => {}); this.building.catch(() => { if (gen === this.gen) this.building = null; }); }
+    await this.building;
+    const fresh = (c) => !this.seen.has(songKey(c.a, c.t));
+    if (mode === 'P' || mode === 'T') return shuffle(this.list.filter(fresh)).slice(0, n);
+    const arts = shuffle(this.arts.filter((e) => !e.done)).slice(0, 8);
+    const out = [];
+    for (const e of arts) {
+      const tr = await this.artistTracks(e, f, mode).catch(() => []);
+      out.push(...shuffle(tr.filter(fresh)).slice(0, Math.ceil(n / Math.max(1, arts.length))));
+    }
+    return shuffle(out).slice(0, n);
+  },
   take(status) {
     const a = this.ahead;
     this.ahead = null;
@@ -293,7 +321,6 @@ function nearestStop(p) {
   STOPS.forEach((_, i) => { const x = Math.abs(stopPos(i) - p); if (x < d) { d = x; best = i; } });
   return best;
 }
-const EQ = '<span class="eq" aria-hidden="true"><i></i><i></i><i></i><i></i></span>';
 
 /* ================= Game ================= */
 const Game = {
@@ -359,7 +386,7 @@ const Game = {
               <button class="mini-btn" data-g="pp" id="g-pp" aria-label="Pause">${ICON.pause}</button>
               <div class="mini-main">
                 <input type="range" id="g-scrub" min="0" max="1000" step="1" value="0" aria-label="Song position">
-                <div class="mini-times"><span id="g-cur">0:00</span><span id="g-eq">${EQ}</span><span id="g-dur">0:00</span></div>
+                <div class="mini-times"><span id="g-cur">0:00</span><span id="g-dur">0:00</span></div>
               </div>
               <button class="mini-btn" data-g="restart" aria-label="Play from the start">${ICON.restart}</button>
             </div>
@@ -393,7 +420,7 @@ const Game = {
 
         <div class="bottom-bar">
           <div class="layer controls">
-            ${dj ? '<button class="btn" style="flex:1" data-g="dj-new">New pick</button><button class="btn light" style="flex:1.6" data-g="reveal" id="g-reveal">Reveal</button>'
+            ${dj ? '<button class="btn" style="flex:1; padding:0 12px" data-g="dj-new">' + ICON.dice + ' Random pick</button><button class="btn light" style="flex:1" data-g="reveal" id="g-reveal">Reveal</button>'
               : '<button class="btn light" style="flex:1" data-g="reveal" id="g-reveal">Reveal</button>'}
           </div>
           <div class="layer info">
@@ -411,7 +438,7 @@ const Game = {
     this.updateClipUI();
     this.offs.push(Player.onError((code) => this.onPlayerError(code)));
     this.offs.push(Player.on((s) => this.onState(s)));
-    Player.load().catch((e) => Errors.show(e.message));
+    Player.load().catch(() => {});
     firstVisit('game');
     if (this.mode === 'dj') {
       if (this.djPicking || !this.round) this.showDJPick();
@@ -463,7 +490,7 @@ const Game = {
         ytm: () => { if (this.round) { Player.stop(); openYTMusic(this.round.item.v); } },
         'dj-yt': () => this.djSearchYouTube(),
         'dj-random': () => this.djRandom(),
-        'dj-new': () => this.showDJPick(),
+        'dj-new': () => this.djRandomRound(),
         'dj-again': () => { this.unreveal(); setTimeout(() => this.showDJPick(), 300); },
         'dj-pass': () => this.passPhone(),
       };
@@ -495,7 +522,7 @@ const Game = {
       const b = e.target.closest('[data-pick]');
       if (!b) return;
       const item = this.djCandidates[parseInt(b.dataset.pick, 10)];
-      if (item) { SongFinder.remember(item.a, item.t, item.v); this.djChoose(item); }
+      if (item) this.djPickItem(item);
     });
   },
 
@@ -587,25 +614,39 @@ const Game = {
   async preload(item) {
     const myToken = ++this.token;
     const yt = Player.yt;
+    const durP = YTData.duration(item.v).catch(() => 0);
     yt.mute();
     yt.loadVideoById({ videoId: item.v, startSeconds: 0 });
     const started = await Player.waitFor([1], 6000);
     if (myToken !== this.token) return;
-    let ok = started;
-    if (started) {
-      const t0 = Date.now();
-      while (Player.time() < 0.25 && Date.now() - t0 < 60000) {
-        if (Date.now() - t0 > 3500) this.caption('Still loading (an ad may be playing silently)…');
-        await sleep(120);
-        if (myToken !== this.token) return;
-        if (Player.state !== 1 && Player.state !== 3) { try { yt.playVideo(); } catch (e) { /* ignore */ } }
-      }
-    }
+    if (this.round && this.round.item === item) this.round.dur = await Promise.race([durP, sleep(3000).then(() => 0)]);
+    if (myToken !== this.token) return;
+    const ok = started;
+    if (started && !(await this.waitOutAd(myToken))) return;
     try { yt.pauseVideo(); yt.seekTo(0, true); } catch (e) { /* ignore */ }
     if (!this.round || this.round.item !== item) return;
     this.round.phase = 'ready';
     this.setEnabled(true);
     this.caption(ok ? 'Name that song' : 'Name that song (tap Play clip)');
+  },
+  // An ad is playing when the player's length doesn't match the song's real length.
+  isAd() {
+    const r = this.round, d = Player.duration();
+    return !!(r && r.dur && d && Math.abs(d - r.dur) > 3);
+  },
+  // Keep the player running, muted, until the real song has started. Returns false if the round moved on.
+  async waitOutAd(myToken) {
+    const yt = Player.yt, t0 = Date.now();
+    while (Date.now() - t0 < 120000) {
+      const ad = this.isAd();
+      if (!ad && Player.time() >= 0.25) return true;
+      if (ad) this.caption('An ad is playing silently. The song is next…');
+      else if (Date.now() - t0 > 3500) this.caption('Still loading…');
+      await sleep(150);
+      if (myToken !== this.token) return false;
+      if (Player.state !== 1 && Player.state !== 3) { try { yt.mute(); yt.playVideo(); } catch (e) { /* ignore */ } }
+    }
+    return true;
   },
   restoreRound() {
     this.fillInfo();
@@ -676,6 +717,19 @@ const Game = {
       return;
     }
     this.unlocked = true;
+    if (this.isAd()) {
+      try { yt.mute(); } catch (e) { /* ignore */ }
+      r.phase = 'loading';
+      this.playUI(false);
+      this.setEnabled(false);
+      if (!(await this.waitOutAd(myToken))) return;
+      try { yt.pauseVideo(); yt.seekTo(startAt, true); } catch (e) { /* ignore */ }
+      r.phase = 'ready';
+      this.setEnabled(true);
+      this.caption('Name that song');
+      toast('An ad came up and played silently. Tap Play clip.');
+      return;
+    }
     const t0 = performance.now();
     const step = () => {
       if (myToken !== this.token) return;
@@ -698,7 +752,7 @@ const Game = {
   playUI(on, p) {
     const b = $('#g-play'), lbl = $('#g-play-lbl'), prog = $('#g-prog');
     if (!b) return;
-    if (on && !b.classList.contains('playing')) { b.classList.add('playing'); lbl.innerHTML = EQ + ' Playing'; }
+    if (on && !b.classList.contains('playing')) { b.classList.add('playing'); lbl.textContent = 'Playing…'; }
     if (!on && b.classList.contains('playing')) { b.classList.remove('playing'); lbl.innerHTML = ICON.play + ' Play clip'; }
     prog.style.transform = `scaleX(${on ? p || 0 : 0})`;
   },
@@ -754,10 +808,12 @@ const Game = {
       }
       $('#g-scrub').style.setProperty('--fill', (d ? (c / d) * 100 : 0) + '%');
       $('#g-dur').textContent = fmtTime(d);
-      $('#g-eq').classList.toggle('on', playing);
       const pp = $('#g-pp');
-      pp.innerHTML = playing ? ICON.pause : ICON.play;
-      pp.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+      if (pp.dataset.playing !== String(playing)) {
+        pp.dataset.playing = String(playing);
+        pp.innerHTML = playing ? ICON.pause : ICON.play;
+        pp.setAttribute('aria-label', playing ? 'Pause' : 'Play');
+      }
     };
     tick();
     this.ticker = setInterval(tick, 250);
@@ -826,27 +882,70 @@ const Game = {
     if (q) q.value = '';
     this.renderDJResults('');
   },
-  renderDJResults(query) {
+  // Under the search box: a few random songs from the current pool (playlist songs, or Last.fm picks)
+  async renderDJResults(query) {
     const box = $('#dj-results');
     if (!box) return;
-    this.djSeq = (this.djSeq || 0) + 1;
-    const pool = Pool.searchable();
-    let list;
-    if (!pool.length) {
-      box.innerHTML = '<p class="muted">Tap Random pick, or type a song and tap Search YouTube.</p>';
-      this.djCandidates = [];
-      return;
-    }
+    const seq = this.djSeq = (this.djSeq || 0) + 1;
+    const f = Pool.get();
+    const mode = Pool.mode(f);
+    let list, note = '';
     if (query && query.trim()) {
-      list = pool.map((it) => ({ it, s: fuzzyScore(query, it.t + ' ' + it.a) })).filter((x) => x.s > 0)
+      const all = Pool.searchable().concat(this.djSample || []);
+      list = all.map((it) => ({ it, s: fuzzyScore(query, it.t + ' ' + it.a) })).filter((x) => x.s > 0)
         .sort((a, b) => b.s - a.s).slice(0, 60).map((x) => x.it);
+      if (!list.length) { box.innerHTML = '<p class="muted">No close matches here. Tap Search YouTube.</p>'; this.djCandidates = []; return; }
+    } else if (mode === 'P') {
+      list = shuffle(Pool.searchable()).slice(0, 30);
+      note = 'A few from this pool. Type to search your playlists.';
     } else {
-      list = shuffle(pool.slice()).slice(0, 30);
+      box.innerHTML = '<p class="muted">Picking a few songs from this pool…</p>';
+      try { list = await Pool.sample(30); } catch (e) { list = []; if (e instanceof ApiError && /key/i.test(e.message)) Errors.show(e.message); }
+      if (seq !== this.djSeq) return;
+      this.djSample = list;
+      note = 'A few from this pool. Type to search, or tap Search YouTube.';
     }
     this.djCandidates = list;
     box.innerHTML = list.length
-      ? (query ? '' : '<p class="muted small" style="margin:4px 0">A few from your playlists. Type to search.</p>') + list.map((it, i) => resultRow(it, i)).join('')
-      : '<p class="muted">No close matches in your playlists. Tap Search YouTube.</p>';
+      ? (note ? `<p class="muted small" style="margin:4px 0">${note}</p>` : '') + list.map((it, i) => resultRow(it, i)).join('')
+      : '<p class="muted">Tap Random pick, or type a song and tap Search YouTube.</p>';
+  },
+  async djPickItem(item) {
+    if (item.v) { SongFinder.remember(item.a, item.t, item.v); this.djChoose(item); return; }
+    const box = $('#dj-results');
+    const seq = this.djSeq = (this.djSeq || 0) + 1;
+    box.innerHTML = `<p class="muted">Finding "${esc(item.t)}" on YouTube…</p>`;
+    try {
+      const v = await SongFinder.find(item.a, item.t);
+      if (seq !== this.djSeq) return;
+      if (!v) { toast("Couldn't find that one on YouTube. Pick another."); this.renderDJResults(''); return; }
+      this.djChoose({ v, a: item.a, t: item.t });
+    } catch (e) {
+      this.renderDJResults('');
+      Errors.show(e.message || String(e), e instanceof ApiError ? '' : e);
+    }
+  },
+  // DJ "Random" button on the game screen: straight into a new random round
+  async djRandomRound() {
+    const seq = ++this.roundSeq;
+    this.stopTimers();
+    this.token++;
+    Player.stop();
+    this.round = null;
+    this.root.classList.remove('revealed');
+    this.setEnabled(false);
+    const art = $('#g-djart');
+    const say = (t) => { if (seq === this.roundSeq) art.innerHTML = `<div class="djwait">${esc(t)}</div>`; };
+    say('Finding a song…');
+    try {
+      const item = await Pool.take(say);
+      if (seq !== this.roundSeq) return;
+      if (!item) { say('No songs fit this pool. Tap the pool bar to change it.'); return; }
+      this.startRound(item);
+    } catch (e) {
+      say('Could not get a song');
+      Errors.show(e.message || String(e), e instanceof ApiError ? '' : e);
+    }
   },
   async djRandom() {
     const box = $('#dj-results');
@@ -1125,8 +1224,8 @@ const Game = {
 };
 
 function resultRow(it, i) {
-  const thumb = it.thumb || `https://i.ytimg.com/vi/${it.v}/default.jpg`;
-  return `<button class="result" data-pick="${i}"><img src="${esc(thumb)}" alt="" loading="lazy">
+  const thumb = it.thumb || (it.v ? `https://i.ytimg.com/vi/${it.v}/default.jpg` : '');
+  return `<button class="result" data-pick="${i}">${thumb ? `<img src="${esc(thumb)}" alt="" loading="lazy">` : '<span class="ph"></span>'}
     <span style="min-width:0"><span class="t" style="display:block">${esc(it.t)}</span><span class="a" style="display:block">${esc(it.a)}</span></span></button>`;
 }
 function fmtSec(x) {

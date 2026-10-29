@@ -10,7 +10,7 @@ const CONFIG = {
 };
 // =====================================================================
 
-const APP_VERSION = '2.0';
+const APP_VERSION = '2.2';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -362,6 +362,22 @@ const YTData = {
       guard++;
     } while (pageToken && guard < 200);
     return out;
+  },
+  // A video's real length (1 unit per call), remembered. Lets the game tell an ad from the song.
+  async duration(id) {
+    const cache = Store.get('durs', {});
+    if (cache[id]) return cache[id];
+    const j = await this.get('videos', { part: 'contentDetails', id });
+    const iso = (j.items && j.items[0] && j.items[0].contentDetails && j.items[0].contentDetails.duration) || '';
+    const m = iso.match(/P(?:(\d+)D)?T?(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?/) || [];
+    const sec = (+m[1] || 0) * 86400 + (+m[2] || 0) * 3600 + (+m[3] || 0) * 60 + (+m[4] || 0);
+    if (sec) {
+      cache[id] = sec;
+      const keys = Object.keys(cache);
+      if (keys.length > 6000) keys.slice(0, 1000).forEach((k) => delete cache[k]);
+      Store.set('durs', cache, true);
+    }
+    return sec;
   },
   async searchSongs(q) {
     const j = await this.get('search', { part: 'snippet', type: 'video', videoCategoryId: '10', maxResults: 15, q });

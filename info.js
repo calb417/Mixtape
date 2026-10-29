@@ -7,6 +7,21 @@ function stripHtml(s) {
   d.innerHTML = String(s || '').replace(/<a [^>]*>Read more on Last\.fm<\/a>\.?/i, '');
   return (d.textContent || '').replace(/\s+\n/g, '\n').trim();
 }
+// "drums (drum set)" → "drums"; leaves out "original", "touring" and the like
+function cleanInst(attrs) {
+  const out = [];
+  (attrs || []).forEach((x) => {
+    if (/original|founder|additional|touring|guest|minor|support/i.test(x)) return;
+    const v = String(x).replace(/\s*\([^)]*\)/g, '').trim();
+    if (v && !out.includes(v)) out.push(v);
+  });
+  return out;
+}
+function yearsText(m) {
+  if (!(m.b < 9999)) return '';
+  const end = m.cur ? 'present' : (m.e || '');
+  return end === m.b || !end ? String(m.b) : `${m.b}–${end}`;
+}
 function songKey(a, t) { return norm(a) + '|' + norm(t); }
 function fmtTime(sec) {
   sec = Math.max(0, Math.floor(sec || 0));
@@ -218,6 +233,25 @@ const Wiki = {
     const j = await getJSON('https://en.wikipedia.org/w/api.php?action=parse&format=json&formatversion=2&origin=*&redirects=1&prop=wikitext&page=' + encodeURIComponent(title), 'Wikipedia');
     return (j && j.parse && j.parse.wikitext) || '';
   },
+  // Find a song's Wikipedia article: "<title> (… song)" by that artist
+  async findSong(title, artist) {
+    const j = await getJSON('https://en.wikipedia.org/w/api.php?action=query&list=search&format=json&origin=*&srlimit=6&srsearch=' + encodeURIComponent(`"${title}" ${artist} song`), 'Wikipedia');
+    const hits = (j && j.query && j.query.search) || [];
+    const t = norm(title);
+    const hit = hits.find((h) => norm(h.title.replace(/\s*\(.*\)$/, '')) === t && (/\bsong\b|single/i.test(h.title) || norm(h.snippet).includes(norm(artist))));
+    return hit ? hit.title : '';
+  },
+  // Writers from a song article's infobox
+  songwriters(wt) {
+    const kv = templateKV(wt, /\{\{\s*Infobox (song|single)/i);
+    const raw = [kv.writer, kv.writers, kv.songwriter, kv.songwriters, kv.composer, kv.lyricist].filter(Boolean).join('|');
+    if (!raw) return [];
+    const v = raw.replace(/<ref[\s\S]*?(<\/ref>|\/>)/gi, '').replace(/<!--[\s\S]*?-->/g, '');
+    const names = [...v.matchAll(/\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g)].map((m) => m[1].replace(/\s*\(.*\)$/, '').trim());
+    v.replace(/\[\[[^\]]*\]\]/g, '|').replace(/\{\{|\}\}|\b(flatlist|hlist|plainlist|ubl|unbulleted list)\b|<br\s*\/?>|\*/gi, '|')
+      .split(/[|,\n]|\band\b|&/).map((x) => x.trim()).filter((x) => /^[A-Z][\w.'’ -]{2,40}$/.test(x)).forEach((x) => names.push(x));
+    return names.filter((n, i) => n && names.findIndex((m) => norm(m) === norm(n)) === i).slice(0, 8);
+  },
   // Pull the "Professional ratings" box from an album's Wikipedia page
   ratings(wt) {
     const start = wt.search(/\{\{\s*(Album|Music) ratings/i);
@@ -259,6 +293,17 @@ const Wiki = {
     return out;
   },
 };
+function templateKV(wt, re) {
+  const start = wt.search(re);
+  if (start < 0) return {};
+  let depth = 0, i = start;
+  for (; i < wt.length; i++) {
+    if (wt.startsWith('{{', i)) { depth++; i++; } else if (wt.startsWith('}}', i)) { depth--; i++; if (!depth) break; }
+  }
+  const kv = {};
+  splitTop(wt.slice(start + 2, i - 1)).slice(1).forEach((p) => { const m = p.match(/^\s*([A-Za-z0-9 _]+?)\s*=\s*([\s\S]*)$/); if (m) kv[m[1].toLowerCase().replace(/[\s_]+/g, '')] = m[2].trim(); });
+  return kv;
+}
 function splitTop(s) {
   const out = []; let depth = 0, cur = '';
   for (let i = 0; i < s.length; i++) {
@@ -407,10 +452,10 @@ const Cards = {
     const name = o.name || o.artist || '';
     box.innerHTML = `<div class="hero"><div class="hero-ph round" data-ph><i>${this.initials(name)}</i></div>
         <div><div class="hero-name">${esc(name)}</div><div class="hero-meta" data-meta></div></div></div>
-      <div class="chips" data-tags></div>
       <div data-about><p class="muted">Loading…</p></div>
       <div data-members></div>
       <h3>Albums</h3><div data-albums><p class="muted">Loading…</p></div>
+      <div data-tags></div>
       <div data-similar></div>
       <p class="muted small">Setlists and upcoming shows arrive with the Setlist Study Guide and Concerts Near Me updates.</p>
       <div class="card-actions"><button class="btn small" data-ytm="" data-q="${esc(name)}">${ICON.out} YouTube Music</button></div>`;
@@ -420,7 +465,7 @@ const Cards = {
     this.set(box, '[data-ph]', `<i>${this.initials(realName)}</i>`);
     if (lf) {
       const tags = LastFM.arr(lf.tags && lf.tags.tag).slice(0, 6).map((t) => t.name);
-      this.set(box, '[data-tags]', tags.map((t) => `<span class="chip">${esc(t)}</span>`).join(''));
+      if (tags.length) this.set(box, '[data-tags]', '<h3>Genres</h3><div class="chips">' + tags.map((t) => `<span class="chip">${esc(t)}</span>`).join('') + '</div>');
       const sim2 = LastFM.arr(lf.similar && lf.similar.artist).slice(0, 8).map((a) => a.name);
       if (sim2.length) this.set(box, '[data-similar]', `<h3>Similar artists</h3><div class="chips">${sim2.map((n) => `<button class="chip link" ${this.attrs('artist', { name: n })}>${esc(n)}</button>`).join('')}</div>`);
     }
@@ -453,13 +498,16 @@ const Cards = {
       const byId = new Map();
       (mb.relations || []).filter((r) => r.type === 'member of band' && r.direction === 'backward' && r.artist).forEach((r) => {
         const m = byId.get(r.artist.id) || { mbid: r.artist.id, name: r.artist.name, inst: new Set(), b: 9999, e: 0, cur: false };
-        (r.attributes || []).filter((x) => !/original|founder|additional|touring|guest/i.test(x)).forEach((x) => m.inst.add(x));
+        cleanInst(r.attributes).forEach((x) => m.inst.add(x));
         const b = yearOf(r.begin), e = yearOf(r.end);
         if (b) m.b = Math.min(m.b, b);
         if (!r.ended) m.cur = true; else if (e) m.e = Math.max(m.e, e);
         byId.set(r.artist.id, m);
       });
-      const members = [...byId.values()].sort((x, y) => x.b - y.b);
+      // Longest-serving first (the Beatles: John, Paul, George, Ringo, then Pete Best, Stuart Sutcliffe…)
+      const now = new Date().getFullYear();
+      const span = (m) => (m.b < 9999 ? (m.cur ? now : (m.e || m.b)) - m.b : 0);
+      const members = [...byId.values()].sort((x, y) => (y.cur - x.cur) * (mb['life-span'] && mb['life-span'].ended ? 0 : 1) || span(y) - span(x) || x.b - y.b);
       if (members.length) {
         let photos = {};
         try {
@@ -469,7 +517,7 @@ const Cards = {
         } catch (e) { photos = {}; }
         this.set(box, '[data-members]', '<h3>Members</h3>' + this.peopleRow(members.map((m) => ({
           mbid: m.mbid, name: m.name, sub: [...m.inst].slice(0, 3).join(', '),
-          years: m.b < 9999 ? `${m.b}–${m.cur ? 'present' : (m.e || '')}` : '',
+          years: yearsText(m),
           photo: photos[norm(m.name)] || Object.entries(photos).find(([k]) => sim(k, m.name) > 0.85)?.[1] || '',
         }))));
       }
@@ -498,14 +546,14 @@ const Cards = {
     const bands = new Map(), inst = new Set();
     (mb.relations || []).filter((r) => r.type === 'member of band' && r.direction === 'forward' && r.artist).forEach((r) => {
       const b = bands.get(r.artist.id) || { mbid: r.artist.id, name: r.artist.name, b: 9999, e: 0, cur: false };
-      (r.attributes || []).filter((x) => !/original|founder|additional|touring|guest/i.test(x)).forEach((x) => inst.add(x));
+      cleanInst(r.attributes).forEach((x) => inst.add(x));
       if (yearOf(r.begin)) b.b = Math.min(b.b, yearOf(r.begin));
       if (!r.ended) b.cur = true; else if (yearOf(r.end)) b.e = Math.max(b.e, yearOf(r.end));
       bands.set(r.artist.id, b);
     });
     if (inst.size) this.set(box, '[data-inst]', `<div class="chips">${[...inst].slice(0, 6).map((x) => `<span class="chip">${esc(x)}</span>`).join('')}</div>`);
     const bl = [...bands.values()].sort((x, y) => x.b - y.b);
-    this.set(box, '[data-bands]', bl.length ? '<h3>Bands</h3><div class="rows">' + bl.map((b) => `<button class="rowbtn" ${this.attrs('artist', { name: b.name, mbid: b.mbid })}><span>${esc(b.name)}</span><span class="muted">${b.b < 9999 ? `${b.b}–${b.cur ? 'present' : (b.e || '')}` : ''}</span></button>`).join('') + '</div>' : '');
+    this.set(box, '[data-bands]', bl.length ? '<h3>Bands</h3><div class="rows">' + bl.map((b) => `<button class="rowbtn" ${this.attrs('artist', { name: b.name, mbid: b.mbid })}><span>${esc(b.name)}</span><span class="muted">${yearsText(b)}</span></button>`).join('') + '</div>' : '');
     const q = MB.wikidata(mb.relations);
     const ents = q ? await Wiki.entities([q]).catch(() => ({})) : {};
     const sum = await Wiki.summary(Wiki.enTitle(ents[q])).catch(() => null);
@@ -521,7 +569,7 @@ const Cards = {
     this.wire(box);
     box.innerHTML = `<div class="hero"><div class="hero-ph" data-ph>${o.art ? `<img src="${esc(o.art)}" alt="">` : ''}</div>
       <div><div class="hero-name">${esc(o.title || '')}</div><button class="hero-meta link" ${this.attrs('artist', { name: o.artist })}>${esc(o.artist || '')}</button><div class="hero-meta" data-meta></div></div></div>
-      <div data-ratings></div><div data-about></div><h3>Tracks</h3><div data-tracks><p class="muted">Loading…</p></div>`;
+      <h3>Tracks</h3><div data-tracks><p class="muted">Loading…</p></div><div data-ratings></div><div data-about></div>`;
     let rg = o.rg;
     if (!rg) {
       const j = await MB.get('release-group', { query: `releasegroup:${MB.q(o.title)} AND artist:${MB.q(o.artist)}`, limit: 10 });
@@ -566,24 +614,25 @@ const Cards = {
     box.innerHTML = `<div class="hero"><div class="hero-ph" data-ph>${o.art ? `<img src="${esc(o.art)}" alt="">` : ''}</div>
       <div><div class="hero-name">${esc(title)}</div><button class="hero-meta link" ${this.attrs('artist', { name: artist })}>${esc(artist)}</button></div></div>
       <div class="facts" data-facts><p class="muted">Loading…</p></div>
-      <div data-writers></div><div data-about></div><div class="chips" data-tags></div>
+      <div data-writers></div>
+      <div data-about></div><div class="chips" data-tags></div>
       <div class="card-actions"><button class="btn small" data-open="https://genius.com/search?q=${encodeURIComponent(artist + ' ' + title)}">Lyrics</button>
         <button class="btn small" data-ytm="${esc(o.v || '')}" data-q="${esc(artist + ' ' + title)}">${ICON.out} YouTube Music</button></div>
       <p class="muted small">How often it's played on the current tour arrives with the Setlist Study Guide update.</p>`;
-    const facts = { album: '', rg: '', year: 0, len: 0, listeners: 0 };
+    const facts = { album: '', rg: '', year: 0, len: 0 };
     const showFacts = () => {
       const rows = [];
-      if (facts.album) rows.push(`<div class="fact"><span class="k">Album</span><button class="v link" ${this.attrs('album', { rg: facts.rg, artist, title: facts.album })}>${esc(facts.album)}</button></div>`);
+      if (facts.album) rows.push(`<div class="fact wide"><span class="k">Album</span><button class="v link" ${this.attrs('album', { rg: facts.rg, artist, title: facts.album })}>${esc(facts.album)}</button></div>`);
       if (facts.year) rows.push(`<div class="fact"><span class="k">Year</span><span class="v">${facts.year}</span></div>`);
       if (facts.len) rows.push(`<div class="fact"><span class="k">Length</span><span class="v">${fmtTime(facts.len)}</span></div>`);
-      if (facts.listeners) rows.push(`<div class="fact"><span class="k">Last.fm</span><span class="v">${facts.listeners.toLocaleString()} listeners</span></div>`);
       this.set(box, '[data-facts]', rows.join('') || '<p class="muted">No details found.</p>');
     };
+    let bgSet = false;
+    const setBg = (text, link) => { if (text) { this.set(box, '[data-about]', '<h3>Background</h3>' + this.about(text, link)); bgSet = true; } };
     const lf = await LastFM.trackInfo(artist, title).catch((e) => { if (/key/i.test(e.message)) throw e; return null; });
     if (lf) {
       facts.album = (lf.album && lf.album.title) || '';
       facts.len = (+lf.duration || 0) / 1000;
-      facts.listeners = +lf.listeners || 0;
       const tags = LastFM.arr(lf.toptags && lf.toptags.tag).slice(0, 5).map((t) => t.name);
       this.set(box, '[data-tags]', tags.map((t) => `<span class="chip">${esc(t)}</span>`).join(''));
       const art = lf.album && LastFM.arr(lf.album.image).map((i) => i['#text']).filter(Boolean).pop();
@@ -592,35 +641,49 @@ const Cards = {
       if (w) this.set(box, '[data-about]', '<h3>Background</h3>' + this.about(w));
     }
     showFacts();
-    // MusicBrainz: earliest studio recording → year, length, album, writers
-    const j = await MB.get('recording', { query: `recording:${MB.q(title)} AND artist:${MB.q(artist)}`, limit: 15 }).catch(() => null);
-    const recs = ((j && j.recordings) || []).filter((r) => (r.score || 0) >= 60 && sim(r.title, title) >= 0.85 && !/live|demo|remix|rehearsal|acoustic|karaoke/i.test(r.disambiguation || ''))
+    // MusicBrainz: earliest studio recording → year, length, album; its "work" → the writers
+    const j = await MB.get('recording', { query: `recording:${MB.q(title)} AND artist:${MB.q(artist)}`, limit: 25 }).catch(() => null);
+    const recs = ((j && j.recordings) || []).filter((r) => (r.score || 0) >= 60 && sim(r.title, title) >= 0.85 && sim(MB.credit(r['artist-credit']), artist) >= 0.6 && !/live|demo|remix|rehearsal|acoustic|karaoke/i.test(r.disambiguation || ''))
       .sort((a, b) => (yearOf(a['first-release-date']) || 9999) - (yearOf(b['first-release-date']) || 9999));
     const rec = recs[0];
-    if (!rec) { showFacts(); return; }
-    facts.year = yearOf(rec['first-release-date']);
-    if (!facts.len && rec.length) facts.len = rec.length / 1000;
-    const albumRel = (rec.releases || []).filter((r) => r['release-group'] && r['release-group']['primary-type'] === 'Album' && !(r['release-group']['secondary-types'] || []).length)
-      .sort((a, b) => String(a.date || '9999').localeCompare(String(b.date || '9999')))[0];
-    if (albumRel) { facts.album = albumRel['release-group'].title; facts.rg = albumRel['release-group'].id; }
-    showFacts();
-    const full = await MB.get('recording/' + rec.id, { inc: 'work-rels' }).catch(() => null);
-    const workRel = full && (full.relations || []).find((r) => r.type === 'performance' && r.work);
-    if (!workRel) return;
-    const work = await MB.get('work/' + workRel.work.id, { inc: 'artist-rels+url-rels' }).catch(() => null);
-    if (!work) return;
-    const writers = new Map();
-    (work.relations || []).filter((r) => /composer|lyricist|writer/.test(r.type) && r.artist).forEach((r) => {
-      const w = writers.get(r.artist.id) || { mbid: r.artist.id, name: r.artist.name, roles: new Set() };
-      w.roles.add(r.type === 'lyricist' ? 'lyrics' : r.type === 'composer' ? 'music' : 'writer');
-      writers.set(r.artist.id, w);
-    });
-    if (writers.size) this.set(box, '[data-writers]', '<h3>Written by</h3>' + this.peopleRow([...writers.values()].map((w) => ({ mbid: w.mbid, name: w.name, sub: [...w.roles].join(', ') }))));
-    const q = MB.wikidata(work.relations);
-    let sum = null;
-    if (q) { const ents = await Wiki.entities([q]).catch(() => ({})); sum = await Wiki.summary(Wiki.enTitle(ents[q])).catch(() => null); }
-    const bg = sum && sum.extract;
-    if (bg) this.set(box, '[data-about]', '<h3>Background</h3>' + this.about(bg, sum && sum.content_urls && sum.content_urls.mobile && sum.content_urls.mobile.page));
+    if (rec) {
+      facts.year = yearOf(rec['first-release-date']);
+      if (!facts.len && rec.length) facts.len = rec.length / 1000;
+      const albumRel = (rec.releases || []).filter((r) => r['release-group'] && r['release-group']['primary-type'] === 'Album' && !(r['release-group']['secondary-types'] || []).length)
+        .sort((a, b) => String(a.date || '9999').localeCompare(String(b.date || '9999')))[0];
+      if (albumRel) { facts.album = albumRel['release-group'].title; facts.rg = albumRel['release-group'].id; }
+      showFacts();
+    }
+    const writers = [];
+    let work = null;
+    for (const r of recs.slice(0, 3)) {          // the first recordings that link to the song's "work"
+      const full = await MB.get('recording/' + r.id, { inc: 'work-rels' }).catch(() => null);
+      const wr = full && (full.relations || []).find((x) => x.type === 'performance' && x.work);
+      if (!wr) continue;
+      work = await MB.get('work/' + wr.work.id, { inc: 'artist-rels+url-rels' }).catch(() => null);
+      if (work) break;
+    }
+    if (work) {
+      const byId = new Map();
+      (work.relations || []).filter((r) => /composer|lyricist|writer/.test(r.type) && r.artist).forEach((r) => {
+        const w = byId.get(r.artist.id) || { mbid: r.artist.id, name: r.artist.name, roles: new Set() };
+        w.roles.add(r.type === 'lyricist' ? 'lyrics' : r.type === 'composer' ? 'music' : 'words & music');
+        byId.set(r.artist.id, w);
+      });
+      byId.forEach((w) => writers.push({ mbid: w.mbid, name: w.name, sub: w.roles.size > 1 ? 'words & music' : [...w.roles][0] }));
+    }
+    // Wikipedia: the song's own article (for the background, and for writers MusicBrainz doesn't list)
+    let page = '';
+    const q = work ? MB.wikidata(work.relations) : '';
+    if (q) { const ents = await Wiki.entities([q]).catch(() => ({})); page = Wiki.enTitle(ents[q]); }
+    if (!page) page = await Wiki.findSong(title, artist).catch(() => '');
+    if (page) {
+      const [sum, wt] = await Promise.all([Wiki.summary(page).catch(() => null), writers.length ? '' : Wiki.wikitext(page).catch(() => '')]);
+      if (sum && sum.extract) setBg(sum.extract, sum.content_urls && sum.content_urls.mobile && sum.content_urls.mobile.page);
+      if (!writers.length && wt) Wiki.songwriters(wt).forEach((n) => writers.push({ name: n }));
+    }
+    if (writers.length) this.set(box, '[data-writers]', '<h3>Written by</h3>' + this.peopleRow(writers));
+    if (!bgSet && !(lf && lf.wiki)) this.set(box, '[data-about]', '');
   },
 };
 document.addEventListener('click', (e) => {
