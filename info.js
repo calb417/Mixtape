@@ -453,7 +453,21 @@ const Cards = {
       if (o) window.open(o.dataset.open, '_blank');
       const y = e.target.closest('[data-ytm]');
       if (y) openYTMusic(y.dataset.ytm, y.dataset.q);
+      const my = e.target.closest('[data-myart]');
+      if (my && typeof MyArtists !== 'undefined') {
+        const added = MyArtists.toggle(my.dataset.myart, my.dataset.mbid);
+        toast(added ? `Added ${my.dataset.myart} to My Artists` : `Removed ${my.dataset.myart} from My Artists`);
+        this.myButton(box);
+        document.dispatchEvent(new Event('myartists'));
+      }
     });
+  },
+  myButton(box) {
+    const b = box.querySelector('[data-myart]');
+    if (!b || typeof MyArtists === 'undefined') { if (b) b.remove(); return; }
+    const has = MyArtists.has(b.dataset.myart);
+    b.innerHTML = has ? `${ICON.check} In My Artists` : '+ My Artists';
+    b.classList.toggle('primary', !has);
   },
   stars(s) {
     if (s.stars != null && s.of === 5) {
@@ -476,10 +490,13 @@ const Cards = {
       <div data-tags></div>
       <div data-similar></div>
       <p class="muted small">Setlists and upcoming shows arrive with the Setlist Study Guide and Concerts Near Me updates.</p>
-      <div class="card-actions"><button class="btn small" data-ytm="" data-q="${esc(name)}">${ICON.out} YouTube Music</button></div>`;
+      <div class="card-actions"><button class="btn small" data-myart="${esc(name)}"></button><button class="btn small" data-ytm="" data-q="${esc(name)}">${ICON.out} YouTube Music</button></div>`;
+    this.myButton(box);
     const lf = await LastFM.artistInfo(name).catch((e) => { if (/key/i.test(e.message)) throw e; return null; });
     const realName = (lf && lf.name) || name;
     this.set(box, '.hero-name', esc(realName));
+    const mb0 = box.querySelector('[data-myart]');
+    if (mb0) { mb0.dataset.myart = realName; if (lf && lf.mbid) mb0.dataset.mbid = lf.mbid; this.myButton(box); }
     this.set(box, '[data-ph]', `<i>${this.initials(realName)}</i>`);
     if (lf) {
       const tags = LastFM.arr(lf.tags && lf.tags.tag).slice(0, 6).map((t) => t.name);
@@ -552,13 +569,17 @@ const Cards = {
     this.wire(box);
     box.innerHTML = `<div class="hero"><div class="hero-ph round" data-ph><i>${this.initials(o.name)}</i></div>
       <div><div class="hero-name">${esc(o.name || '')}</div><div class="hero-meta" data-meta></div></div></div>
-      <div data-inst></div><div data-about></div><div data-bands><p class="muted">Loading…</p></div><div data-solo></div>`;
+      <div data-inst></div><div data-about></div><div data-bands><p class="muted">Loading…</p></div><div data-solo></div>
+      <div class="card-actions"><button class="btn small" data-myart="${esc(o.name || '')}"></button></div>`;
+    this.myButton(box);
     let id = o.mbid;
     if (!id) { const f = await MB.findArtist(o.name); id = f && f.id; }
     if (!id) { this.set(box, '[data-bands]', '<p class="muted">Not found on MusicBrainz.</p>'); return; }
     const mb = await MB.get('artist/' + id, { inc: 'url-rels+artist-rels' });
     if (!mb) { this.set(box, '[data-bands]', '<p class="muted">Not found on MusicBrainz.</p>'); return; }
     this.set(box, '.hero-name', esc(mb.name));
+    const mbP = box.querySelector('[data-myart]');
+    if (mbP) { mbP.dataset.myart = mb.name; mbP.dataset.mbid = mb.id; this.myButton(box); }
     const ls = mb['life-span'] || {};
     this.set(box, '[data-meta]', esc([mb.area && mb.area.name, yearOf(ls.begin) ? `Born ${yearOf(ls.begin)}` : '', yearOf(ls.end) ? `Died ${yearOf(ls.end)}` : ''].filter(Boolean).join(' · ')));
     const bands = new Map(), inst = new Set();

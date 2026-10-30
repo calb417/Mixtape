@@ -190,7 +190,14 @@ const Pool = {
     this.lastArtists.push(norm(item.a));
     if (this.lastArtists.length > 6) this.lastArtists.shift();
   },
-  defaults: () => ({ playlists: [], artists: [], genres: [], decades: [], hits: null }),
+  defaults: () => ({ playlists: [], artists: [], useMy: false, genres: [], decades: [], hits: null }),
+  // Picked artists plus, when "All of My Artists" is on, everyone in My Artists
+  artistList(f) {
+    if (!f.useMy || typeof MyArtists === 'undefined') return f.artists;
+    const out = f.artists.slice(), have = new Set(out.map((a) => norm(a.name)));
+    MyArtists.list().forEach((a) => { if (!have.has(norm(a.name))) { have.add(norm(a.name)); out.push({ name: a.name, mbid: a.mbid, albums: [] }); } });
+    return out;
+  },
   get() {
     let f = Store.get('filters', null);
     if (!f) {
@@ -211,15 +218,16 @@ const Pool = {
     const parts = [];
     const names = Store.get('pools', []).filter((p) => f.playlists.includes(p.id)).map((p) => p.name);
     if (names.length) parts.push(names.join(' + '));
-    if (f.artists.length) parts.push(f.artists.map((a) => a.name).join(' + '));
+    if (f.useMy) parts.push('My Artists' + (f.artists.length ? ' + ' + f.artists.map((a) => a.name).join(' + ') : ''));
+    else if (f.artists.length) parts.push(f.artists.map((a) => a.name).join(' + '));
     if (f.decades.length) parts.push(f.decades.join(' + '));
-    if (f.genres.length && !f.artists.length) parts.push(f.genres.join(' + '));
+    if (f.genres.length && !this.artistList(f).length) parts.push(f.genres.join(' + '));
     if (f.hits) parts.push(this.hitsText(f.hits).toLowerCase());
     return parts.join(' · ') || 'Popular songs';
   },
   mode(f) {
     if (f.playlists.length) return 'P';        // saved playlists, filtered
-    if (f.artists.length) return 'A';          // picked artists (and albums)
+    if (this.artistList(f).length) return 'A'; // picked artists (and albums), or My Artists
     return 'B';                                // well-known artists of the genres / decades / charts, then their songs
   },
   async build(f, mode, status) {
@@ -229,7 +237,7 @@ const Pool = {
       this.list = shuffle([...map.values()]);
       return;
     }
-    if (mode === 'A') { this.arts = f.artists.map((a) => ({ a, tracks: null })); return; }
+    if (mode === 'A') { this.arts = this.artistList(f).map((a) => ({ a, tracks: null })); return; }
     const hard = (e) => { if (e instanceof ApiError && /key|busy|reach/i.test(e.message)) throw e; return []; };
     status('Gathering artists…');
     // Ranked lists, most popular first; "90s rock" style tags first when both a genre and a decade are picked
@@ -306,8 +314,9 @@ const Pool = {
     if (this.useRecent) { const rec = this.loadRecent(); if (rec.has(k) || (c.v && rec.has(c.v))) return null; }
     if (spread && mode !== 'A' && this.lastArtists.includes(norm(c.a))) { this.spreadSkips++; return null; }   // not the same artist again so soon
     if (mode === 'P') {
-      if (f.artists.length) {
-        const art = f.artists.find((a) => sim(a.name, c.a) >= 0.8);
+      const al = this.artistList(f);
+      if (al.length) {
+        const art = al.find((a) => sim(a.name, c.a) >= 0.8);
         if (!art) return null;
         if (art.albums && art.albums.length && !(await this.albumTitles(art)).has(norm(cleanTitle(c.t)))) return null;
       } else if (f.genres.length) {
@@ -699,7 +708,7 @@ const Game = {
     if (myRound !== this.roundSeq) return;
     if (!item) {
       const f = Pool.get();
-      const empty = !f.playlists.length && !f.artists.length && !f.genres.length && !f.decades.length && !LastFM.ready();
+      const empty = !f.playlists.length && !Pool.artistList(f).length && !f.genres.length && !f.decades.length && !LastFM.ready();
       this.caption(empty ? 'Pick a pool to start' : 'No songs fit this pool. Tap the pool bar to change it.');
       if (empty) setTimeout(() => this.openPools(() => { this.round = null; route(); }), 400);
       return;
@@ -1259,6 +1268,7 @@ const Game = {
           <p class="muted small" data-x="status"></p>
         </details>
         <h3>Artists</h3>
+        <div data-my></div>
         <input class="field" data-x="asearch" placeholder="Search for an artist" autocomplete="off" autocapitalize="off" spellcheck="false">
         <div class="ares" data-ares></div>
         <div class="chips" data-achips></div>
@@ -1286,10 +1296,16 @@ const Game = {
             <button data-x="adel" data-i="${i}" aria-label="Remove ${esc(a.name)}">${ICON.close}</button></span>`).join('')
             + (draft.artists.length ? '<p class="muted small" style="flex-basis:100%;margin:2px 0 0">Tap an artist to pick albums.</p>' : '');
         };
+        const renderMy = () => {
+          const n = typeof MyArtists !== 'undefined' ? MyArtists.list().length : 0;
+          $b('[data-my]').innerHTML = n
+            ? `<div class="row" style="align-items:center; gap:10px; margin-bottom:8px; flex-wrap:wrap"><button class="chip ${draft.useMy ? 'on' : ''}" data-x="useMy">All of My Artists (${n})</button><button class="link-btn" data-x="pickMy">Pick some of them</button></div>`
+            : '<p class="muted small" style="margin:0 0 8px">Tip: add bands to My Artists (on the home screen) to play just them.</p>';
+        };
         const renderGenres = () => {
           const all = GENRES.concat(draft.genres.filter((g) => !GENRES.includes(g)));
           $b('[data-genres]').innerHTML = all.map((g) => `<button class="chip ${draft.genres.includes(g) ? 'on' : ''}" data-x="genre" data-v="${esc(g)}">${esc(g)}</button>`).join('')
-            + (draft.artists.length && draft.genres.length && !draft.playlists.length ? '<p class="muted small" style="flex-basis:100%;margin:2px 0 0">Genres are skipped while artists are picked.</p>' : '');
+            + (Pool.artistList(draft).length && draft.genres.length && !draft.playlists.length ? '<p class="muted small" style="flex-basis:100%;margin:2px 0 0">Genres are skipped while artists are picked.</p>' : '');
         };
         const renderDecades = () => {
           $b('[data-decades]').innerHTML = Object.keys(DEC).map((d) => `<button class="chip ${draft.decades.includes(d) ? 'on' : ''}" data-x="decade" data-v="${d}">${d}</button>`).join('');
@@ -1301,7 +1317,7 @@ const Game = {
             ? `${this.hitsNote(h)} Big hits are an artist's top 3 songs on Last.fm (just the top one for a one-hit wonder); well known is the rest of their top 5. With genres, decades or nothing picked, songs come from well-known artists. Tap more steps to widen the range.`
             : 'Any: playlists play every song, picked artists play their hits through album tracks, and genres and decades play big hits and well-known songs by well-known artists.';
         };
-        const all = () => { renderNow(); renderPl(); renderArtists(); renderGenres(); renderDecades(); renderHits(); };
+        const all = () => { renderNow(); renderPl(); renderMy(); renderArtists(); renderGenres(); renderDecades(); renderHits(); };
         all();
 
         const fetchPool = async (id, existingName) => {
@@ -1384,6 +1400,13 @@ const Game = {
               asearch.value = '';
               $b('[data-ares]').innerHTML = '';
               renderArtists(); renderNow(); renderGenres();
+            }
+            if (x === 'useMy') { draft.useMy = !draft.useMy; renderMy(); renderNow(); renderGenres(); }
+            if (x === 'pickMy') {
+              openMyArtistsPicker(draft.artists, (picked) => {
+                picked.forEach((a) => { if (!draft.artists.some((y) => norm(y.name) === norm(a.name))) draft.artists.push({ name: a.name, mbid: a.mbid, albums: [] }); });
+                renderArtists(); renderNow(); renderGenres();
+              });
             }
             if (x === 'adel') { draft.artists.splice(parseInt(b.dataset.i, 10), 1); renderArtists(); renderNow(); renderGenres(); }
             if (x === 'albums') {

@@ -307,3 +307,23 @@ button.hero-meta, button.v.link, .hero .link { background: none; border: none; p
 .plog { font-family: var(--mono); font-size: 10.5px; line-height: 1.45; white-space: pre-wrap; word-break: break-all; color: var(--muted); background: var(--surface2); border-radius: 10px; padding: 10px; }
 .djst { position: absolute; left: 0; right: 0; top: 0; padding: 8px 12px; background: rgba(0,0,0,0.65); color: #fff; font-size: 13px; text-align: center; }
 .djst:empty { display: none; }
+/* My Artists */
+.wide-tile > svg { width: 10px; height: 16px; color: var(--faint); }
+.my-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-top: 18px; }
+.field.slim { height: 36px; font-size: 14px; width: 150px; }
+.my-list { margin: 8px 16px 0 16px; background: var(--surface); border: 1px solid var(--surface2); border-radius: 16px; overflow: hidden; }
+.my-list:empty { display: none; }
+.my-row { display: flex; align-items: center; gap: 8px; padding: 0 12px 0 0; border-bottom: 1px solid var(--surface2); }
+.my-row:last-child { border-bottom: none; }
+.my-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 12px; padding: 10px 12px; background: none; border: none; text-align: left; }
+.my-main:disabled { opacity: 1; }
+.my-main .ph { width: 38px; height: 38px; flex: 0 0 38px; border-radius: 19px; background: var(--surface2); display: flex; align-items: center; justify-content: center; }
+.my-main .ph i { font-style: normal; font-family: var(--display); font-weight: 800; font-size: 14px; color: var(--muted); }
+.my-main .n { flex: 1; min-width: 0; font-weight: 600; font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.my-main svg { color: var(--faint); flex: 0 0 auto; }
+.batch-list .check { padding: 6px 0; border-bottom: 1px solid var(--surface2); }
+.batch-list .check.have { opacity: 0.55; }
+.box-btn { background: none; border: none; padding: 6px; margin: -6px; display: inline-flex; }
+.name-edit { width: 100%; background: transparent; border: none; border-bottom: 1px dashed transparent; color: var(--text); font: inherit; font-weight: 600; padding: 2px 0; }
+.name-edit:focus { outline: none; border-bottom-color: var(--accent); }
+.rowbtn .tap { color: var(--text); font-size: 15px; }

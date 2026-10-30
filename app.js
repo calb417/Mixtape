@@ -11,7 +11,7 @@ const CONFIG = {
 // =====================================================================
 
 // The version lives in index.html (<meta name="mixtape-version">) so the update check can compare it.
-const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '2.7';
+const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '2.8';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -267,6 +267,16 @@ const HELP = {
       <li>Paste the link in Song pool → Add a YouTube Music playlist.</li></ol>
       <p>Mixtape saves the song list on this phone. Tap <b>Refresh</b> after you change the playlist.</p>`,
   },
+  artists: {
+    title: 'My Artists',
+    html: `<p>One list of the bands you follow. The game can play just them, and the Setlist Study Guide and Concerts Near Me will use it later.</p>
+      <ul><li><b>Search</b> at the top and tap <b>Add</b>.</li>
+      <li><b>From a playlist</b> lists every artist in one of your playlists, with how many songs each has. Tick the ones you want (Select all / Select none), fix any name by tapping it, then <b>Add</b>. Artists you already have are marked and skipped.</li>
+      <li>Any artist card has a <b>+ My Artists</b> button.</li>
+      <li>Tap an artist for their card. <b>Edit</b> shows remove buttons.</li>
+      <li><b>Play in the game</b> sets the game's song pool to all of My Artists. In the song pool you can also pick just some of them.</li></ul>
+      <p>The list is saved on this phone (and in backups). Sharing it with other phones comes with sync.</p>`,
+  },
   settings: {
     title: 'Settings',
     html: `<ul><li><b>Appearance</b>: pick any accent and background color. Text adjusts to stay readable. Reset goes back to black and orange.</li>
@@ -508,6 +518,7 @@ Views.home = {
   html() {
     const pool = (typeof Pool !== 'undefined') ? Pool.label() : 'Popular songs';
     const clip = STOPS[Settings.get().clipIndex] || 0.5;
+    const myCount = Store.get('myArtists', []).length;
     return `<div class="screen">
       <header class="topbar">
         <div class="brand" style="color: var(--accent)">${ICON.tape}<h1 style="color: var(--text); margin:0; font-family: var(--display); font-weight: 800">Mixtape</h1></div>
@@ -529,11 +540,11 @@ Views.home = {
           ${tile('pin', 'Concerts Near Me', 'Within 40 miles of Melville')}
           ${tile('diary', 'Concert Diary', "Every show you've seen")}
         </div>
-        <button class="wide-tile" data-a="soon">
+        <button class="wide-tile" data-a="artists">
           <span class="row" style="align-items:center; gap:12px">${ICON.people}
             <span><span style="display:block; font-family: var(--display); font-weight:600; font-size:18px">My Artists</span>
-            <span style="display:block; font-size:12.5px; color: var(--muted)">Bands you follow, in one place</span></span></span>
-          <span class="soon" style="position:static; font-family: var(--mono); font-size:10px; letter-spacing:1px; color: var(--faint); border:1px solid var(--line); border-radius:999px; padding:3px 7px">SOON</span>
+            <span style="display:block; font-size:12.5px; color: var(--muted)">${myCount ? `${myCount} band${myCount === 1 ? '' : 's'} you follow` : 'Bands you follow, in one place'}</span></span></span>
+          ${ICON.chev}
         </button>
       </div>
     </div>`;
@@ -550,6 +561,7 @@ Views.home = {
       if (a === 'help') showHelp('home');
       if (a === 'settings') go('#settings');
       if (a === 'game') go('#game');
+      if (a === 'artists') go('#artists');
       if (a === 'soon') toast('Coming in a later update');
     });
     firstVisit('home');
