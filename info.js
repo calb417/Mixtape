@@ -320,12 +320,12 @@ function splitTop(s) {
 /* ================= A song's first-release year (MusicBrainz) ================= */
 const Year = {
   cache: null,
-  load() { if (!this.cache) this.cache = Store.get('years', {}); return this.cache; },
+  load() { if (!this.cache) { this.cache = Store.get('years2', {}); Store.del('years'); } return this.cache; },
   known(a, t) { const c = this.load(); const k = songKey(a, t); return k in c ? c[k] : undefined; },
   async get(a, t) {
     const c = this.load(), k = songKey(a, t);
     if (k in c) return c[k];
-    const j = await MB.get('recording', { query: `recording:${MB.q(t)} AND artist:${MB.q(a)}`, limit: 25 }, 0);
+    const j = await MB.get('recording', { query: `recording:${MB.q(t)} AND artist:${MB.q(a)}`, limit: 100 }, 0);
     const years = ((j && j.recordings) || [])
       .filter((r) => (r.score || 0) >= 60 && sim(r.title, t) >= 0.85 && sim(MB.credit(r['artist-credit']), a) >= 0.6 && !/live|demo|remix|rehearsal|acoustic|karaoke/i.test(r.disambiguation || ''))
       .map((r) => yearOf(r['first-release-date'])).filter(Boolean);
@@ -333,7 +333,25 @@ const Year = {
     c[k] = y;
     const keys = Object.keys(c);
     if (keys.length > 6000) keys.slice(0, 1000).forEach((x) => delete c[x]);
-    Store.set('years', c, true);
+    Store.set('years2', c, true);
+    return y;
+  },
+  // Apple's earliest release of the song (a second opinion when a year fits the decade)
+  async apple(a, t) {
+    const c = Store.get('yearsApple', {}), k = songKey(a, t);
+    if (k in c) return c[k];
+    const params = new URLSearchParams({ term: `${a} ${t}`.slice(0, 120), entity: 'song', media: 'music', limit: '25' });
+    const data = await jsonp('https://itunes.apple.com/search?' + params.toString());
+    let y = 0;
+    (data.results || []).forEach((r) => {
+      if (sim(t, r.trackName) < 0.85 || sim(a, r.artistName) < 0.7 || /live|demo|remix|karaoke|tribute/i.test(r.trackName + ' ' + r.collectionName)) return;
+      const yr = yearOf(r.releaseDate);
+      if (yr && (!y || yr < y)) y = yr;
+    });
+    c[k] = y;
+    const keys = Object.keys(c);
+    if (keys.length > 4000) keys.slice(0, 800).forEach((x) => delete c[x]);
+    Store.set('yearsApple', c, true);
     return y;
   },
 };

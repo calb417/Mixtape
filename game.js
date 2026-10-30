@@ -22,6 +22,7 @@ class YTPlayer {
     this.wrapId = n === 1 ? 'yt-wrap' : 'yt-wrap' + n;
     this.elId = n === 1 ? 'yt-player' : 'yt-player' + n;
     this.builds = 0;
+    this.lastEvent = 0;
     this.yt = null; this.loading = null; this.state = -1;
     this.listeners = new Set(); this.errorListeners = new Set();
   }
@@ -66,6 +67,7 @@ class YTPlayer {
             onReady: () => { this.log('player ready'); finish(); },
             onStateChange: (e) => {
               this.state = e.data;
+              this.lastEvent = Date.now();
               this.log('state');
               if (e.data === 1 && this.wrap().classList.contains('unlock') && !this.adPlaying()) this.finishUnlock();
               this.listeners.forEach((fn) => fn(e.data));
@@ -156,7 +158,7 @@ function bandOf(top, i) {
   if (i < 0 || i >= top.length) return 4;
   const lead = (top[0] && top[0].n) || 0;
   if (i < 3 && (!lead || (top[i].n || 0) >= lead * 0.25)) return 0;
-  return i < 15 ? 1 : i < 60 ? 2 : i < 200 ? 3 : 4;
+  return i < 5 ? 1 : i < 20 ? 2 : i < 60 ? 3 : 4;
 }
 // For genres, decades or nothing picked: skip artists whose biggest song has fewer Last.fm listeners than this
 function popFloor(f) { const hi = f.hits ? f.hits[1] : 1; return hi <= 1 ? 500000 : hi === 2 ? 150000 : 0; }
@@ -166,7 +168,28 @@ const DEC = { '50s': { tag: '50s', from: 1950 }, '60s': { tag: '60s', from: 1960
   '90s': { tag: '90s', from: 1990 }, '00s': { tag: '00s', from: 2000 }, '10s': { tag: '2010s', from: 2010 }, '20s': { tag: '2020s', from: 2020 } };
 
 const Pool = {
-  gen: 0, list: null, arts: null, building: null, ahead: null, seen: new Set(), restarted: -1,
+  gen: 0, list: null, arts: null, building: null, ahead: null, seen: new Set(), restarted: -1, useRecent: true, lastArtists: [],
+  // Songs played in the last 7 days (up to 400), kept on the phone so a new session doesn't repeat them
+  recentList: null, recentSet: null,
+  loadRecent() {
+    if (!this.recentList) {
+      const cutoff = Date.now() - 7 * 864e5;
+      this.recentList = Store.get('recent', []).filter((x) => x[1] > cutoff);
+      this.recentSet = new Set();
+      this.recentList.forEach((x) => { this.recentSet.add(x[0]); if (x[2]) this.recentSet.add(x[2]); });
+    }
+    return this.recentSet;
+  },
+  remember(item) {
+    this.loadRecent();
+    const k = songKey(item.a, item.t);
+    this.recentList.push([k, Date.now(), item.v]);
+    if (this.recentList.length > 400) this.recentList.splice(0, this.recentList.length - 400);
+    this.recentSet.add(k); this.recentSet.add(item.v);
+    Store.set('recent', this.recentList, true);
+    this.lastArtists.push(norm(item.a));
+    if (this.lastArtists.length > 6) this.lastArtists.shift();
+  },
   defaults: () => ({ playlists: [], artists: [], genres: [], decades: [], hits: null }),
   get() {
     let f = Store.get('filters', null);
@@ -182,7 +205,7 @@ const Pool = {
     return f;
   },
   set(f) { Store.set('filters', f); this.reset(); },
-  reset() { this.gen++; this.list = null; this.arts = null; this.building = null; this.ahead = null; },
+  reset() { this.gen++; this.list = null; this.arts = null; this.building = null; this.ahead = null; this.useRecent = true; },
   hitsText(h) { return !h ? 'Any' : h[0] === h[1] ? BANDS[h[0]] : `${BANDS[h[0]]} – ${BANDS[h[1]]}`; },
   label(f = this.get()) {
     const parts = [];
@@ -276,9 +299,12 @@ const Pool = {
     }
     return null;
   },
-  async check(c, f, mode, status) {
+  async check(c, f, mode, status, spread) {
     const blocked = new Set(Store.get('blocked', []));
-    if (this.seen.has(songKey(c.a, c.t)) || (c.v && (this.seen.has(c.v) || blocked.has(c.v)))) return null;
+    const k = songKey(c.a, c.t);
+    if (this.seen.has(k) || (c.v && (this.seen.has(c.v) || blocked.has(c.v)))) return null;
+    if (this.useRecent) { const rec = this.loadRecent(); if (rec.has(k) || (c.v && rec.has(c.v))) return null; }
+    if (spread && mode !== 'A' && this.lastArtists.includes(norm(c.a))) { this.spreadSkips++; return null; }   // not the same artist again so soon
     if (mode === 'P') {
       if (f.artists.length) {
         const art = f.artists.find((a) => sim(a.name, c.a) >= 0.8);
@@ -301,7 +327,9 @@ const Pool = {
         status(`Checking which songs are from the ${f.decades.join(' or ')}…`);
         y = await Year.get(c.a, c.t).catch(() => 0);
       }
-      if (y) { if (!f.decades.some((d) => y >= DEC[d].from && y < DEC[d].from + 10)) return null; }
+      const fits = (yr) => f.decades.some((d) => yr >= DEC[d].from && yr < DEC[d].from + 10);
+      if (y && fits(y)) { const y2 = await Year.apple(c.a, c.t).catch(() => 0); if (y2 && y2 < y) y = y2; }
+      if (y) { if (!fits(y)) return null; }
       else if (c.src !== 'decade') return null;
     }
     let v = c.v;
@@ -317,14 +345,25 @@ const Pool = {
     if (mode !== 'P' && !LastFM.ready()) throw new ApiError('No Last.fm key yet. Open app.js on GitHub and paste your Last.fm key in the marked spot at the top. (Playlists work without it.)');
     if (!this.building) { this.building = this.build(f, mode, status); this.building.catch(() => { if (gen === this.gen) this.building = null; }); }
     await this.building;
-    let tried = 0;
+    let tried = 0, spread = true;
     this.misses = 0;
+    this.spreadSkips = 0;
     for (;;) {
       if (gen !== this.gen) return null;
       if (this.misses >= 5) throw new ApiError("Couldn't find the last few songs on YouTube, so Mixtape stopped to save your daily lookups. Try Next song, or change the pool.");
       const c = await this.candidate(f, mode);
       if (!c) {
-        if (mode === 'P' && this.restarted !== gen && this.seen.size) {
+        if (spread && this.spreadSkips) {  // small pool: let the same artist come up again
+          spread = false;
+          await this.build(f, mode, status);
+          continue;
+        }
+        if (this.useRecent) {            // everything left was played in the last week: allow those again
+          this.useRecent = false;
+          await this.build(f, mode, status);
+          continue;
+        }
+        if (this.restarted !== gen && this.seen.size) {
           this.restarted = gen;
           this.seen.clear();
           await this.build(f, mode, status);
@@ -336,9 +375,9 @@ const Pool = {
       tried++;
       if (tried > 200) return null;
       if (tried > 3 && tried % 4 === 0) status(`Finding a song that fits… (${tried} checked)`);
-      const item = await this.check(c, f, mode, status);
+      const item = await this.check(c, f, mode, status, spread && tried < 40);
       if (gen !== this.gen) return null;
-      if (item) { this.seen.add(songKey(item.a, item.t)); this.seen.add(item.v); return item; }
+      if (item) { this.seen.add(songKey(item.a, item.t)); this.seen.add(item.v); this.remember(item); return item; }
     }
   },
   // A handful of songs from the pool to show the DJ (not yet checked against decades or YouTube)
@@ -717,13 +756,26 @@ const Game = {
     await p.load();
     if (!live()) return null;
     p.mute();
+    let loadAt = Date.now();
     p.yt.loadVideoById({ videoId: item.v, startSeconds: 0 });
     p.sample('load ' + item.v);
     const dur = await Promise.race([durP, sleep(2500).then(() => 0)]);
     const t0 = Date.now();
-    let ok = false, adLogged = false, lastT = -1, stuckSince = Date.now();
+    let ok = false, adLogged = false, lastT = -1, stuckSince = Date.now(), rebuilt = false;
     while (Date.now() - t0 < 120000) {
       if (!live()) return null;
+      if (!rebuilt && p.lastEvent < loadAt && Date.now() - loadAt > 5000) {
+        rebuilt = true;
+        p.log('player not answering: rebuilding');
+        p.reset();
+        await p.load();
+        if (!live()) return null;
+        p.mute();
+        loadAt = Date.now();
+        p.yt.loadVideoById({ videoId: item.v, startSeconds: 0 });
+        stuckSince = Date.now();
+        continue;
+      }
       const st = p.state, t = p.time();
       const ad = p.adPlaying(item.v, dur);
       if (t !== lastT) { lastT = t; stuckSince = Date.now(); }
@@ -1049,9 +1101,10 @@ const Game = {
     this.token++;
     this.playUI(false);
     this.dropStage();
-    Player.log('app hidden: players dropped');
-    P1.reset(); P2.reset();
-    this.unlocked = false;
+    Player.log('app hidden: players stopped');
+    r.phase = 'loading';
+    this.setEnabled(false);
+    [P1, P2].forEach((p) => { try { if (p.yt) { p.yt.mute(); p.yt.stopVideo(); } } catch (e) { /* ignore */ } });
     this.needsReload = true;
   },
   onShow() {
@@ -1245,7 +1298,7 @@ const Game = {
           const h = draft.hits;
           $b('[data-hits]').innerHTML = `<button class="${h ? '' : 'on'}" data-x="hany">Any</button>` + BANDS.map((n, i) => `<button class="${h && i >= h[0] && i <= h[1] ? 'on' : ''}" data-x="hit" data-i="${i}">${n}</button>`).join('');
           $b('[data-hitsnote]').textContent = h
-            ? `${this.hitsNote(h)} Big hits are an artist's top 3 songs on Last.fm (just the top one for a one-hit wonder); well known is the rest of their top 15. With genres, decades or nothing picked, songs come from well-known artists. Tap more steps to widen the range.`
+            ? `${this.hitsNote(h)} Big hits are an artist's top 3 songs on Last.fm (just the top one for a one-hit wonder); well known is the rest of their top 5. With genres, decades or nothing picked, songs come from well-known artists. Tap more steps to widen the range.`
             : 'Any: playlists play every song, picked artists play their hits through album tracks, and genres and decades play big hits and well-known songs by well-known artists.';
         };
         const all = () => { renderNow(); renderPl(); renderArtists(); renderGenres(); renderDecades(); renderHits(); };
