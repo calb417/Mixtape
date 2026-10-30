@@ -10,7 +10,8 @@ const CONFIG = {
 };
 // =====================================================================
 
-const APP_VERSION = '2.4';
+// The version lives in index.html (<meta name="mixtape-version">) so the update check can compare it.
+const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '2.5';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -473,6 +474,7 @@ function route() {
   if (currentView && currentView.leave) currentView.leave();
   Sheets.closeAll();
   currentView = view;
+  if (Updater.pending && view !== Views.game) { Updater.apply(); }
   document.body.classList.toggle('locked', view === Views.game);
   $('#app').innerHTML = view.html();
   if (view.mount) view.mount($('#app'));
@@ -678,10 +680,43 @@ const Backup = {
   },
 };
 
+/* ---------------- Auto-update: reload once when GitHub has a newer version ---------------- */
+// Each time Mixtape opens or comes back on screen it asks GitHub for index.html. If that version differs
+// from the one running, it reloads once onto the new files (never in the middle of a round).
+const Updater = {
+  pending: null,
+  async check() {
+    if (!/^https?:/.test(location.protocol)) return;
+    try {
+      const r = await fetch('./index.html?check=' + Date.now(), { cache: 'no-store' });
+      if (!r.ok) return;
+      const m = (await r.text()).match(/name="mixtape-version" content="([^"]+)"/);
+      const running = (document.querySelector('meta[name=mixtape-version]') || {}).content || 'old';
+      if (!m || m[1] === running) return;
+      let done = null;
+      try { done = sessionStorage.getItem('mixtape.updatedTo'); } catch (e) { /* ignore */ }
+      if (done === m[1]) return;          // already tried once this session (GitHub may still be publishing)
+      this.pending = m[1];
+      if (currentView === Views.game && typeof Game !== 'undefined' && Game.round) { toast(`Update ${m[1]} is ready. It installs when you go back Home.`); return; }
+      this.apply();
+    } catch (e) { /* offline: try again next time */ }
+  },
+  apply() {
+    const v = this.pending;
+    if (!v) return;
+    this.pending = null;
+    try { sessionStorage.setItem('mixtape.updatedTo', v); } catch (e) { /* ignore */ }
+    toast('Updating to v' + v + '…');
+    setTimeout(() => location.replace('./?v=' + encodeURIComponent(v) + '#home'), 700);
+  },
+};
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') Updater.check(); });
+
 /* ---------------- Start ---------------- */
 const STOPS = [0.1, 0.2, 0.3, 0.5, 0.75, 1, 1.5, 2, 3, 5, 10, 15, 30, 60];
 document.addEventListener('DOMContentLoaded', () => {
   applyTheme();
   route();
   Wake.on();
+  Updater.check();
 });
