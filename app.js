@@ -11,7 +11,7 @@ const CONFIG = {
 // =====================================================================
 
 // The version lives in index.html (<meta name="mixtape-version">) so the update check can compare it.
-const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '2.8';
+const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '2.9';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -267,6 +267,15 @@ const HELP = {
       <li>Paste the link in Song pool → Add a YouTube Music playlist.</li></ol>
       <p>Mixtape saves the song list on this phone. Tap <b>Refresh</b> after you change the playlist.</p>`,
   },
+  diary: {
+    title: 'Concert Diary',
+    html: `<p>A record of every show you've been to.</p>
+      <ul><li><b>Add a show</b>: artist and date are all it needs. Add the venue, city, openers, a rating and notes too.</li>
+      <li><b>Setlists</b>: one box per act on the bill. Type or paste one song per line (numbers in front are removed). Pulling setlists straight from setlist.fm arrives with the sync update.</li>
+      <li>Tap a show to see it; tap the artist, an opener or a song for its info card. <b>Edit</b> changes or deletes it.</li>
+      <li><b>Search</b> by artist, venue, city or year. <b>Stats</b> shows shows per year, most-seen artists, most-visited venues and the songs you've heard live most.</li></ul>
+      <p>Saved on this phone and in backups until sync arrives.</p>`,
+  },
   artists: {
     title: 'My Artists',
     html: `<p>One list of the bands you follow. The game can play just them, and the Setlist Study Guide and Concerts Near Me will use it later.</p>
@@ -519,6 +528,7 @@ Views.home = {
     const pool = (typeof Pool !== 'undefined') ? Pool.label() : 'Popular songs';
     const clip = STOPS[Settings.get().clipIndex] || 0.5;
     const myCount = Store.get('myArtists', []).length;
+    const diaryCount = Store.get('diary', []).length;
     return `<div class="screen">
       <header class="topbar">
         <div class="brand" style="color: var(--accent)">${ICON.tape}<h1 style="color: var(--text); margin:0; font-family: var(--display); font-weight: 800">Mixtape</h1></div>
@@ -538,7 +548,7 @@ Views.home = {
           ${tile('notes', 'Setlist Study Guide', 'Prep for your next show')}
           ${tile('list', 'Playlist Builder', 'Make, sort and fix playlists')}
           ${tile('pin', 'Concerts Near Me', 'Within 40 miles of Melville')}
-          ${tile('diary', 'Concert Diary', "Every show you've seen")}
+          ${tile('diary', 'Concert Diary', diaryCount ? `${diaryCount} show${diaryCount === 1 ? '' : 's'} logged` : "Every show you've seen", 'diary')}
         </div>
         <button class="wide-tile" data-a="artists">
           <span class="row" style="align-items:center; gap:12px">${ICON.people}
@@ -548,8 +558,8 @@ Views.home = {
         </button>
       </div>
     </div>`;
-    function tile(icon, t, d) {
-      return `<button class="tile" data-a="soon"><span class="soon">SOON</span>${ICON[icon].replace('<svg', '<svg stroke="currentColor" style="color: var(--accent); width:26px; height:26px"')}
+    function tile(icon, t, d, view) {
+      return `<button class="tile" data-a="${view || 'soon'}">${view ? '' : '<span class="soon">SOON</span>'}${ICON[icon].replace('<svg', '<svg stroke="currentColor" style="color: var(--accent); width:26px; height:26px"')}
         <span class="t">${t}</span><span class="d">${d}</span></button>`;
     }
   },
@@ -562,6 +572,7 @@ Views.home = {
       if (a === 'settings') go('#settings');
       if (a === 'game') go('#game');
       if (a === 'artists') go('#artists');
+      if (a === 'diary') go('#diary');
       if (a === 'soon') toast('Coming in a later update');
     });
     firstVisit('home');
