@@ -14,7 +14,8 @@ const MyArtists = {
     name = String(name || '').trim();
     if (!name || this.has(name)) return false;
     const list = this.list();
-    list.push({ name, mbid: mbid || '', added: new Date().toISOString().slice(0, 10) });
+    list.push({ name, mbid: mbid || '', added: new Date().toISOString().slice(0, 10), edited: Date.now() });
+    if (typeof Sync !== 'undefined') Sync.untomb('myArtists', norm(name));
     this.save(list);
     return true;
   },
@@ -26,13 +27,14 @@ const MyArtists = {
       const name = String(it.name || '').trim();
       if (!name || have.has(norm(name))) return;
       have.add(norm(name));
-      list.push({ name, mbid: it.mbid || '', added: new Date().toISOString().slice(0, 10) });
+      list.push({ name, mbid: it.mbid || '', added: new Date().toISOString().slice(0, 10), edited: Date.now() });
+      if (typeof Sync !== 'undefined') Sync.untomb('myArtists', norm(name));
       n++;
     });
     this.save(list);
     return n;
   },
-  remove(name) { const k = norm(name); this.save(this.list().filter((a) => norm(a.name) !== k)); },
+  remove(name) { const k = norm(name); if (typeof Sync !== 'undefined') Sync.tombstone('myArtists', k); this.save(this.list().filter((a) => norm(a.name) !== k)); },
   toggle(name, mbid) {
     if (this.has(name)) { this.remove(name); return false; }
     this.add(name, mbid);

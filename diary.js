@@ -10,11 +10,13 @@ const Diary = {
   },
   get(id) { return this.list().find((e) => e.id === id); },
   put(entry) {
+    entry.edited = Date.now();
+    if (typeof Sync !== 'undefined') Sync.untomb('diary', entry.id);
     const list = this.list().filter((e) => e.id !== entry.id);
     list.push(entry);
     this.save(list);
   },
-  remove(id) { this.save(this.list().filter((e) => e.id !== id)); },
+  remove(id) { if (typeof Sync !== 'undefined') Sync.tombstone('diary', id); this.save(this.list().filter((e) => e.id !== id)); },
   newId() { return 'd' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); },
   // One song per line; strips numbering like "1." or "01 -" and blank lines
   parseSongs(text) {

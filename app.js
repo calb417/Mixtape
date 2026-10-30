@@ -7,11 +7,14 @@
 const CONFIG = {
   YOUTUBE_API_KEY: 'AIzaSyDz0tlqHQZU8WFEoCWcc6w4VnK01l9sZYY',
   LASTFM_API_KEY: '506225735c83135da4286cc87db378b0',
+  // The Mixtape relay's address (from Cloudflare), e.g. 'https://mixtape-relay.yourname.workers.dev'.
+  // Leave empty until the relay is set up. Once it holds the keys, the two keys above can be emptied.
+  RELAY_URL: '',
 };
 // =====================================================================
 
 // The version lives in index.html (<meta name="mixtape-version">) so the update check can compare it.
-const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '2.9';
+const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.0';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -117,8 +120,9 @@ const Store = {
   set(key, value, quiet) {
     try { localStorage.setItem(this.k(key), JSON.stringify(value)); }
     catch (e) { if (!quiet) Errors.show('Could not save on this phone. Storage may be full.', e); }
+    if (typeof Sync !== 'undefined') Sync.touch(key);
   },
-  del(key) { try { localStorage.removeItem(this.k(key)); } catch (e) { /* ignore */ } },
+  del(key) { try { localStorage.removeItem(this.k(key)); } catch (e) { /* ignore */ } if (typeof Sync !== 'undefined') Sync.touch(key); },
   allKeys() {
     const out = [];
     for (let i = 0; i < localStorage.length; i++) {
@@ -332,10 +336,12 @@ class ApiError extends Error {}
 const YTData = {
   key() { return (Settings.get().ytKey || '').trim() || CONFIG.YOUTUBE_API_KEY; },
   async get(path, params) {
-    const key = this.key();
-    if (!key || key.startsWith('PASTE-')) throw new ApiError('No YouTube key yet. Open app.js on GitHub and paste your key in the marked spot at the top.');
-    const url = new URL('https://www.googleapis.com/youtube/v3/' + path);
-    Object.entries(Object.assign({}, params, { key })).forEach(([k, v]) => { if (v != null && v !== '') url.searchParams.set(k, v); });
+    // Through the relay when it holds a YouTube key (and no personal key is set); otherwise straight to Google.
+    const viaRelay = typeof Sync !== 'undefined' && Sync.has('youtube') && !(Settings.get().ytKey || '').trim();
+    const key = viaRelay ? '' : this.key();
+    if (!viaRelay && (!key || key.startsWith('PASTE-'))) throw new ApiError('No YouTube key yet. Open app.js on GitHub and paste your key in the marked spot at the top.');
+    const url = new URL(viaRelay ? `${Sync.url()}/youtube/${path}` : 'https://www.googleapis.com/youtube/v3/' + path);
+    Object.entries(Object.assign({}, params, key ? { key } : {})).forEach(([k, v]) => { if (v != null && v !== '') url.searchParams.set(k, v); });
     let r;
     try { r = await fetch(url.toString()); }
     catch (e) { throw new ApiError('Could not reach YouTube. Check the internet connection and try again.'); }
@@ -606,12 +612,12 @@ Views.settings = {
         <div class="li"><span>Song lookups today<div class="sub">${used} of 100 used · ${remembered} songs remembered</div></span></div>
         <div class="li"><span>Player log<div class="sub">What YouTube reported during the last few songs. Screenshot it for Claude if ads get through.</div></span>
           <button class="btn small" data-a="playerlog">View</button></div>
-        <div class="li"><span>Last.fm key<div class="sub">${typeof LastFM !== 'undefined' && LastFM.ready() ? 'Added' : 'Not added yet (top of app.js)'}</div></span></div>
+        <div class="li"><span>Last.fm key<div class="sub">${typeof LastFM !== 'undefined' && LastFM.relay() ? 'In the relay' : typeof LastFM !== 'undefined' && LastFM.ready() ? 'Added' : 'Not added yet (top of app.js)'}</div></span></div>
       </div>
 
       <div class="list-h">Saving</div>
       <div class="list">
-        <div class="li"><span>This phone only<div class="sub">Sync with a code arrives in the next update.</div></span></div>
+        ${syncRow()}
         <div class="li"><span>Backup file<div class="sub">Everything on this phone, in one file</div></span>
           <span class="row"><button class="btn small" data-a="export">Export</button><button class="btn small" data-a="import">Import</button></span></div>
       </div>
@@ -642,6 +648,13 @@ Views.settings = {
       if (a === 'help') showHelp('settings');
       if (a === 'pools') Game.openPools(() => route());
       if (a === 'export') Backup.export();
+      if (a === 'syncStart') {
+        b.disabled = true;
+        Sync.start().then((code) => { toast('Syncing. Code: ' + code); route(); }).catch((err) => { b.disabled = false; Errors.show('Could not start syncing: ' + (err.message || err)); });
+      }
+      if (a === 'syncJoin') openSyncJoin();
+      if (a === 'syncNow') { b.disabled = true; Sync.run(false).then(() => { toast('Synced'); route(); }); }
+      if (a === 'syncStop') { if (confirm('Stop syncing on this phone? Everything stays on this phone, and the other phone keeps its copy.')) { Sync.stop(); route(); } }
       if (a === 'import') $('#import-file').click();
       if (a === 'resetColors') { Settings.set({ accent: DEFAULTS.accent, bg: DEFAULTS.bg }); applyTheme(); route(); }
       if (a === 'playerlog') {
@@ -673,6 +686,36 @@ Views.settings = {
   },
 };
 
+function syncRow() {
+  if (typeof Sync === 'undefined' || !Sync.url()) {
+    return `<div class="li"><span>This phone only<div class="sub">Sync with a code arrives once the relay is set up.</div></span></div>`;
+  }
+  const code = Sync.code();
+  if (!code) {
+    return `<div class="li" style="flex-wrap:wrap"><span>This phone only<div class="sub">Share My Artists, the diary, playlists, the game's pool and settings with another phone.</div></span>
+      <span class="row"><button class="btn small primary" data-a="syncStart">Start syncing</button><button class="btn small" data-a="syncJoin">Enter a code</button></span></div>`;
+  }
+  const last = Store.get('syncLast', '');
+  return `<div class="li" style="flex-wrap:wrap"><span>Syncing<div class="sub">Code <b class="mono">${esc(code)}</b>${last ? ' · last saved ' + esc(new Date(last).toLocaleString('en-US', { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })) : ''}<br>Type this code on the other phone (Settings → Saving → Enter a code).</div></span>
+    <span class="row"><button class="btn small" data-a="syncNow">Sync now</button><button class="btn small" data-a="syncStop">Stop</button></span></div>`;
+}
+function openSyncJoin() {
+  Sheets.open({
+    title: 'Enter a sync code',
+    html: `<p class="muted small" style="margin-top:0">On the other phone: Settings → Saving shows the code, like <span class="mono">amber-falcon-42</span>. What's on this phone is kept and merged in.</p>
+      <input class="field" data-j="code" placeholder="amber-falcon-42" autocomplete="off" autocapitalize="off" spellcheck="false">
+      <div class="row sheet-actions"><button class="btn primary wide" data-j="go">Start syncing</button></div>`,
+    onMount(body, close) {
+      body.querySelector('[data-j=go]').onclick = async (e) => {
+        const b = e.currentTarget;
+        b.disabled = true;
+        try { await Sync.join(body.querySelector('[data-j=code]').value); toast('Syncing'); close(); route(); }
+        catch (err) { b.disabled = false; Errors.show(err.message || String(err)); }
+      };
+    },
+  });
+}
+
 /* ---------------- Backup ---------------- */
 const Backup = {
   export() {
@@ -695,6 +738,7 @@ const Backup = {
       if (!confirm('Load this backup? It replaces what Mixtape has saved on this phone.')) return;
       Store.allKeys().forEach((k) => localStorage.removeItem(k));
       Object.entries(data.items).forEach(([k, v]) => { if (k.startsWith('mixtape.')) localStorage.setItem(k, v); });
+      if (typeof Sync !== 'undefined') Object.keys(data.items).forEach((k) => Sync.touch(k.slice('mixtape.'.length)));   // the backup wins on the next sync
       toast('Backup loaded');
       setTimeout(() => location.reload(), 600);
     } catch (e) {
