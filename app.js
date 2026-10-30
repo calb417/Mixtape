@@ -10,7 +10,7 @@ const CONFIG = {
 };
 // =====================================================================
 
-const APP_VERSION = '2.3';
+const APP_VERSION = '2.4';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -620,13 +620,13 @@ Views.settings = {
       if (a === 'import') $('#import-file').click();
       if (a === 'resetColors') { Settings.set({ accent: DEFAULTS.accent, bg: DEFAULTS.bg }); applyTheme(); route(); }
       if (a === 'playerlog') {
-        const log = (Player.logList || Store.get('playerlog', [])).slice(-120);
+        const log = (PlayerLog.list || Store.get('playerlog', [])).slice(-120);
         Sheets.open({ title: 'Player log', html: log.length ? `<p class="muted small" style="margin-top:0">Newest at the bottom. Each line: time, event, player state, position, length, video, sound.</p><pre class="plog">${esc(log.join('\n'))}</pre><button class="btn small" data-x="clearplog">Clear log</button>` : '<p>Nothing logged yet. Play a few songs first.</p>',
           onMount(body, close) {
             const pre = body.querySelector('.plog');
             if (pre) setTimeout(() => { body.parentElement.scrollTop = body.parentElement.scrollHeight; }, 50);
             const c = body.querySelector('[data-x=clearplog]');
-            if (c) c.onclick = () => { Player.logList = []; Store.set('playerlog', []); close(); };
+            if (c) c.onclick = () => { PlayerLog.clear(); close(); };
           } });
       }
       if (a === 'errors') {

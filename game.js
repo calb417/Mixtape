@@ -1,20 +1,46 @@
 'use strict';
 /* Guess the Intro + DJ Mode + the song pool (filters). Needs app.js and info.js loaded first. */
 
-/* ================= The YouTube player ================= */
-const Player = {
-  yt: null,
-  loading: null,
-  state: -1,
-  listeners: new Set(),
-  errorListeners: new Set(),
+/* ================= The YouTube players ================= */
+// Two hidden players take turns: one plays the round, the other quietly loads the next song
+// (and sits through its ad, muted) so Next song starts right away.
+const PlayerLog = {
+  list: null,
+  add(line) {
+    if (!this.list) this.list = Store.get('playerlog', []);
+    this.list.push(line);
+    if (this.list.length > 250) this.list.splice(0, this.list.length - 250);
+    clearTimeout(this.timer);
+    this.timer = setTimeout(() => Store.set('playerlog', this.list, true), 800);
+  },
+  clear() { this.list = []; Store.set('playerlog', []); },
+};
+const YTQueue = [];
+class YTPlayer {
+  constructor(n) {
+    this.n = n;
+    this.wrapId = n === 1 ? 'yt-wrap' : 'yt-wrap' + n;
+    this.elId = n === 1 ? 'yt-player' : 'yt-player' + n;
+    this.yt = null; this.loading = null; this.state = -1;
+    this.listeners = new Set(); this.errorListeners = new Set();
+  }
+  wrap() {
+    let w = document.getElementById(this.wrapId);
+    if (!w) {
+      w = document.createElement('div');
+      w.id = this.wrapId;
+      w.className = 'yt-wrap';
+      w.innerHTML = '<div class="yt-unlock-text">Tap the video once to turn on sound.<br>You only need to do this once.</div>';
+      document.body.appendChild(w);
+    }
+    return w;
+  }
   load() {
     if (this.loading) return this.loading;
     this.loading = new Promise((resolve, reject) => {
       let waited = 0, retried = false, done = false;
       const finish = (err) => { if (done) return; done = true; clearInterval(watch); if (err) reject(err); else resolve(); };
-      // Only count seconds while Mixtape is on screen (iPhone pauses the player in the background),
-      // and quietly rebuild the player once before giving up.
+      // Only count seconds while Mixtape is on screen, and quietly rebuild the player once before giving up.
       const watch = setInterval(() => {
         if (document.visibilityState !== 'visible') return;
         waited += 1;
@@ -22,12 +48,13 @@ const Player = {
         if (waited >= 30) finish(new Error('The YouTube player took too long to load. Check the connection, then tap Play clip or pick again.'));
       }, 1000);
       const create = () => {
-        if (!document.getElementById('yt-player')) {
+        const w = this.wrap();
+        if (!document.getElementById(this.elId)) {
           const d = document.createElement('div');
-          d.id = 'yt-player';
-          $('#yt-wrap').appendChild(d);
+          d.id = this.elId;
+          w.appendChild(d);
         }
-        this.yt = new YT.Player('yt-player', {
+        this.yt = new YT.Player(this.elId, {
           width: 300,
           height: 170,
           playerVars: { playsinline: 1, controls: 1, rel: 0, modestbranding: 1, origin: location.origin },
@@ -36,7 +63,7 @@ const Player = {
             onStateChange: (e) => {
               this.state = e.data;
               this.log('state');
-              if (e.data === 1 && $('#yt-wrap').classList.contains('unlock')) this.finishUnlock();
+              if (e.data === 1 && this.wrap().classList.contains('unlock') && !this.adPlaying()) this.finishUnlock();
               this.listeners.forEach((fn) => fn(e.data));
             },
             onError: (e) => this.errorListeners.forEach((fn) => fn(e.data)),
@@ -44,69 +71,77 @@ const Player = {
         });
       };
       if (window.YT && window.YT.Player) { create(); return; }
-      window.onYouTubeIframeAPIReady = create;
-      const s = document.createElement('script');
-      s.src = 'https://www.youtube.com/iframe_api';
-      s.onerror = () => finish(new Error('Could not load the YouTube player. Check the connection.'));
-      document.head.appendChild(s);
+      YTQueue.push(create);
+      if (!window.__ytScript) {
+        window.__ytScript = true;
+        window.onYouTubeIframeAPIReady = () => YTQueue.splice(0).forEach((f) => f());
+        const s = document.createElement('script');
+        s.src = 'https://www.youtube.com/iframe_api';
+        s.onerror = () => { window.__ytScript = false; finish(new Error('Could not load the YouTube player. Check the connection.')); };
+        document.head.appendChild(s);
+      }
     });
     this.loading.catch(() => { this.loading = null; this.teardown(); });
     return this.loading;
-  },
+  }
   waitFor(states, ms) {
     return new Promise((resolve) => {
       if (states.includes(this.state)) { resolve(true); return; }
       const off = this.on((s) => { if (states.includes(s)) { off(); clearTimeout(t); resolve(true); } });
       const t = setTimeout(() => { off(); resolve(false); }, ms);
     });
-  },
-  on(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); },
-  onError(fn) { this.errorListeners.add(fn); return () => this.errorListeners.delete(fn); },
-  // A short record of what the YouTube player reports, for tracking down ads (Settings → Player log).
-  logList: null,
+  }
+  on(fn) { this.listeners.add(fn); return () => this.listeners.delete(fn); }
+  onError(fn) { this.errorListeners.add(fn); return () => this.errorListeners.delete(fn); }
   log(ev) {
-    if (!this.logList) this.logList = Store.get('playerlog', []);
     const d = new Date();
     const vd = this.videoData();
-    this.logList.push([`${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${Math.floor(d.getMilliseconds() / 100)}`,
-      ev, 'st' + this.state, 't' + this.time().toFixed(2), 'd' + Math.round(this.duration()), vd.id || '-', this.muted() ? 'muted' : 'sound', (vd.title || '').slice(0, 24)].join(' '));
-    if (this.logList.length > 250) this.logList.splice(0, this.logList.length - 250);
-    clearTimeout(this.logTimer);
-    this.logTimer = setTimeout(() => Store.set('playerlog', this.logList, true), 800);
-  },
-  videoData() { try { const v = (this.yt && this.yt.getVideoData && this.yt.getVideoData()) || {}; return { id: v.video_id || '', title: v.title || '' }; } catch (e) { return {}; } },
-  muted() { try { return !!(this.yt && this.yt.isMuted && this.yt.isMuted()); } catch (e) { return false; } },
+    PlayerLog.add([`${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}.${Math.floor(d.getMilliseconds() / 100)}`,
+      'P' + this.n, ev, 'st' + this.state, 't' + this.time().toFixed(2), 'd' + Math.round(this.duration()), vd.id || '-', this.muted() ? 'muted' : 'sound', (vd.title || '').slice(0, 24)].join(' '));
+  }
   // Log what the player says for a few seconds after something starts it
   sample(label) {
     clearInterval(this.sampler);
     let n = 0;
     this.log(label);
     this.sampler = setInterval(() => { this.log('·'); if (++n >= 12) clearInterval(this.sampler); }, 400);
-  },
-  time() { try { return (this.yt && this.yt.getCurrentTime && this.yt.getCurrentTime()) || 0; } catch (e) { return 0; } },
-  duration() { try { return (this.yt && this.yt.getDuration && this.yt.getDuration()) || 0; } catch (e) { return 0; } },
-  // iPhone sometimes wants one real tap on the video before it allows sound.
-  showUnlock() { $('#yt-wrap').classList.add('unlock'); },
+  }
+  videoData() { try { const v = (this.yt && this.yt.getVideoData && this.yt.getVideoData()) || {}; return { id: v.video_id || '', title: v.title || '' }; } catch (e) { return {}; } }
+  muted() { try { return !!(this.yt && this.yt.isMuted && this.yt.isMuted()); } catch (e) { return false; } }
+  time() { try { return (this.yt && this.yt.getCurrentTime && this.yt.getCurrentTime()) || 0; } catch (e) { return 0; } }
+  duration() { try { return (this.yt && this.yt.getDuration && this.yt.getDuration()) || 0; } catch (e) { return 0; } }
+  // On iPhone an ad shows up as "not started" (state -1) while the clock runs. Also: a different length or video.
+  adPlaying(v, dur) {
+    if (!this.yt) return false;
+    const t = this.time();
+    if (this.state === -1 && t > 0.05) return true;
+    const d = this.duration(), id = this.videoData().id;
+    if (dur && d && Math.abs(d - dur) > 3) return true;
+    if (v && id && id !== v) return true;
+    return false;
+  }
+  mute() { try { this.yt.mute(); } catch (e) { /* ignore */ } }
+  showUnlock() { this.wrap().classList.add('unlock'); }
+  hideUnlock() { const w = document.getElementById(this.wrapId); if (w) w.classList.remove('unlock'); }
   finishUnlock() {
-    $('#yt-wrap').classList.remove('unlock');
+    this.hideUnlock();
     try { this.yt.pauseVideo(); } catch (e) { /* ignore */ }
     Game.unlocked = true;
     toast('Sound is on. Tap Play clip.');
-  },
-  stop() { try { if (this.yt) this.yt.pauseVideo(); } catch (e) { /* ignore */ } },
+  }
+  stop() { try { if (this.yt) { this.yt.mute(); this.yt.pauseVideo(); } } catch (e) { /* ignore */ } }
   // Throw the player away, so the lock screen and Now Playing have nothing to show.
-  reset() {
-    this.teardown();
-    this.loading = null;
-  },
+  reset() { this.teardown(); this.loading = null; }
   teardown() {
     try { if (this.yt) { this.yt.stopVideo(); this.yt.destroy(); } } catch (e) { /* ignore */ }
-    const old = document.getElementById('yt-player');
+    const old = document.getElementById(this.elId);
     if (old && old.tagName === 'IFRAME') old.remove();
     this.yt = null;
     this.state = -1;
-  },
-};
+  }
+}
+const P1 = new YTPlayer(1), P2 = new YTPlayer(2);
+let Player = P1;   // the one playing the current round
 
 /* ================= Song pool: playlists + filters ================= */
 const BANDS = ['Big hits', 'Well known', 'Album tracks', 'Deep cuts', 'Rarities'];
@@ -458,8 +493,10 @@ const Game = {
     this.root = root.querySelector('#game-root');
     this.bind();
     this.updateClipUI();
-    this.offs.push(Player.onError((code) => this.onPlayerError(code)));
-    this.offs.push(Player.on((s) => this.onState(s)));
+    [P1, P2].forEach((p) => {
+      this.offs.push(p.onError((code) => this.onPlayerError(code, p)));
+      this.offs.push(p.on((s) => { if (p === Player) this.onState(s); }));
+    });
     clearInterval(this.guard);
     this.guard = setInterval(() => this.guardTick(), 250);
     Player.load().catch(() => {});
@@ -478,6 +515,8 @@ const Game = {
     this.token++;
     this.roundSeq++;
     Player.stop();
+    this.dropStage();
+    P1.hideUnlock(); P2.hideUnlock();
     this.offs.forEach((off) => off());
     this.offs = [];
   },
@@ -497,9 +536,9 @@ const Game = {
       const map = {
         home: () => go('#home'),
         help: () => showHelp('game'),
-        pools: () => this.openPools(() => { this.round = null; route(); }),
+        pools: () => this.openPools(() => { this.round = null; this.dropStage(); route(); }),
         'mode-guess': () => { if (this.mode !== 'guess') { this.mode = 'guess'; this.round = null; Player.stop(); route(); } },
-        'mode-dj': () => { if (this.mode !== 'dj') { this.mode = 'dj'; this.djPicking = true; this.round = null; Player.stop(); route(); } },
+        'mode-dj': () => { if (this.mode !== 'dj') { this.mode = 'dj'; this.djPicking = true; this.round = null; Player.stop(); this.dropStage(); route(); } },
         play: () => this.playClip(),
         more: () => this.moreTime(),
         skip: () => this.skipSilence(),
@@ -616,66 +655,121 @@ const Game = {
   roundSeq: 0,
   async startRound(item) {
     this.stopTimers();
-    this.token++;
+    const myToken = ++this.token;
     const base = STOPS[Settings.get().clipIndex];
-    this.round = { item, base, len: base, start: 0, undo: [], tries: 0, phase: 'loading', meta: null };
+    this.round = { item, base, len: base, start: 0, undo: [], tries: 0, phase: 'loading', meta: null, dur: 0 };
     this.root.classList.remove('revealed');
     this.fillInfo();
     this.updateClipUI();
     this.setEnabled(false);
     this.caption('Loading the song…');
     Meta.get(item).then((meta) => { if (this.round && this.round.item === item) { this.round.meta = meta; this.fillInfo(); } });
+    const st = this.stage;
+    let res;
     try {
-      await Player.load();
-      await this.preload(item);
+      if (st && st.item && st.item.v === item.v) {
+        // The next song was already loading in the other player: switch to it.
+        this.stage = null;
+        st.live = () => myToken === this.token;          // keep its loading going, now for this round
+        st.say = (t) => this.caption(t);
+        const old = Player;
+        Player = st.p;
+        old.stop();
+        Player.log('switch to staged song');
+        res = st.ready ? st.res : await st.promise;
+        if (!res) res = await this.prepare(Player, item, (t) => this.caption(t), () => myToken === this.token);
+      } else {
+        this.dropStage();
+        await Player.load();
+        if (myToken !== this.token) return;
+        res = await this.prepare(Player, item, (t) => this.caption(t), () => myToken === this.token);
+      }
     } catch (e) {
       Errors.show(e.message || String(e));
       return;
     }
-    if (this.mode === 'guess') Pool.prefetch();
-  },
-  // Load the song muted and let it run until the real song starts, so an ad (if any) plays out silently
-  // and the first clip starts cleanly.
-  async preload(item) {
-    const myToken = ++this.token;
-    const yt = Player.yt;
-    const durP = YTData.duration(item.v).catch(() => 0);
-    yt.mute();
-    yt.loadVideoById({ videoId: item.v, startSeconds: 0 });
-    Player.sample('load ' + item.v);
-    const started = await Player.waitFor([1], 6000);
-    if (myToken !== this.token) return;
-    if (this.round && this.round.item === item) this.round.dur = await Promise.race([durP, sleep(3000).then(() => 0)]);
-    if (myToken !== this.token) return;
-    const ok = started;
-    if (started && !(await this.waitOutAd(myToken))) return;
-    try { yt.pauseVideo(); yt.seekTo(0, true); } catch (e) { /* ignore */ }
-    Player.log('ready');
-    if (!this.round || this.round.item !== item) return;
+    if (!res || myToken !== this.token || !this.round || this.round.item !== item) return;
+    this.round.dur = res.dur;
     this.round.phase = 'ready';
     this.setEnabled(true);
-    this.caption(ok ? 'Name that song' : 'Name that song (tap Play clip)');
+    this.caption(res.ok ? 'Name that song' : 'Name that song (tap Play clip)');
+    this.stageNext();
   },
-  // An ad is playing when the player's length doesn't match the song's real length.
-  isAd() {
-    const r = this.round;
-    if (!r) return false;
-    const d = Player.duration(), id = Player.videoData().id;
-    return !!((r.dur && d && Math.abs(d - r.dur) > 3) || (id && id !== r.item.v));
-  },
-  // Keep the player running, muted, until the real song has started. Returns false if the round moved on.
-  async waitOutAd(myToken) {
-    const yt = Player.yt, t0 = Date.now();
-    let logged = false;
-    while (Date.now() - t0 < 60000) {
-      const ad = this.isAd();
-      if (ad && !logged) { Player.log('ad detected'); logged = true; }
-      if (!ad && Player.time() >= 0.25) return true;
-      if (ad) this.caption('An ad is playing silently. The song is next…');
-      else if (Date.now() - t0 > 3500) this.caption('Still loading…');
+  // Load a song muted into player p and let it run until the real song starts, so an ad plays out
+  // silently and the first clip starts cleanly. Ends paused at 0:00. live() false = give up.
+  async prepare(p, item, say, live) {
+    const durP = YTData.duration(item.v).catch(() => 0);
+    await p.load();
+    if (!live()) return null;
+    p.mute();
+    p.yt.loadVideoById({ videoId: item.v, startSeconds: 0 });
+    p.sample('load ' + item.v);
+    const dur = await Promise.race([durP, sleep(2500).then(() => 0)]);
+    const t0 = Date.now();
+    let ok = false, adLogged = false, lastT = -1, stuckSince = Date.now();
+    while (Date.now() - t0 < 120000) {
+      if (!live()) return null;
+      const st = p.state, t = p.time();
+      const ad = p.adPlaying(item.v, dur);
+      if (t !== lastT) { lastT = t; stuckSince = Date.now(); }
+      if (ad) {
+        if (!adLogged) { p.log('ad detected'); adLogged = true; }
+        say('An ad is playing silently. The song is next…');
+        p.mute();
+        if (Date.now() - stuckSince > 1500) { try { p.yt.playVideo(); } catch (e) { /* ignore */ } stuckSince = Date.now(); }
+      } else if (st === 1 && t >= 0.25) { ok = true; break; }
+      else {
+        if (Date.now() - t0 > 4000) say('Still loading…');
+        if (st !== 1 && st !== 3 && Date.now() - stuckSince > 1500) { try { p.mute(); p.yt.playVideo(); } catch (e) { /* ignore */ } stuckSince = Date.now(); }
+        if (st === -1 && t === 0 && Date.now() - t0 > 12000) break;   // never started: Play clip will start it
+      }
       await sleep(150);
-      if (myToken !== this.token) return false;
-      if (Player.state !== 1 && Player.state !== 3) { try { yt.mute(); yt.playVideo(); } catch (e) { /* ignore */ } }
+    }
+    try { p.yt.pauseVideo(); p.yt.seekTo(0, true); } catch (e) { /* ignore */ }
+    p.log('ready');
+    return { dur, ok };
+  },
+  // Start loading the next song in the other player (Guess mode only).
+  stageNext() {
+    if (this.mode !== 'guess' || this.stage) return;
+    const p = Player === P1 ? P2 : P1;
+    Pool.prefetch();
+    const ahead = Pool.ahead;
+    if (!ahead) return;
+    const st = { p, item: null, ready: false, res: null, say: () => {} };
+    st.live = () => this.stage === st;
+    this.stage = st;
+    st.promise = (async () => {
+      const item = await ahead.p;
+      if (!item || !st.live()) return null;
+      st.item = item;
+      const res = await this.prepare(p, item, (t) => st.say(t), () => st.live());
+      if (!res || !st.live()) return null;
+      st.res = res;
+      st.ready = true;
+      return res;
+    })().catch(() => { if (this.stage === st) this.stage = null; return null; });
+  },
+  dropStage() {
+    const st = this.stage;
+    this.stage = null;
+    if (st) { st.live = () => false; if (st.p !== Player) st.p.stop(); }
+  },
+  isAd() { const r = this.round; return !!(r && Player.adPlaying(r.item.v, r.dur)); },
+  // Keep the player running, muted, until the real song is playing. Returns false if the round moved on.
+  async waitOutAd(myToken) {
+    const r = this.round, t0 = Date.now();
+    Player.log('ad detected');
+    let lastT = -1, stuckSince = Date.now();
+    while (Date.now() - t0 < 120000) {
+      Player.mute();
+      const ad = this.isAd(), t = Player.time();
+      if (t !== lastT) { lastT = t; stuckSince = Date.now(); }
+      if (!ad && Player.state === 1) return true;
+      this.caption('An ad is playing silently. The song is next…');
+      if (Date.now() - stuckSince > 1500) { try { Player.yt.playVideo(); } catch (e) { /* ignore */ } stuckSince = Date.now(); }
+      await sleep(150);
+      if (myToken !== this.token || this.round !== r) return false;
     }
     return true;
   },
@@ -687,10 +781,19 @@ const Game = {
       this.startTicker();
       return;
     }
+    const item = this.round.item;
     this.round.phase = 'loading';
     this.setEnabled(false);
     this.caption('Loading the song…');
-    Player.load().then(() => this.preload(this.round.item)).catch((e) => Errors.show(e.message || String(e)));
+    const myToken = ++this.token;
+    this.prepare(Player, item, (t) => this.caption(t), () => myToken === this.token).then((res) => {
+      if (!res || myToken !== this.token || !this.round || this.round.item !== item) return;
+      this.round.dur = res.dur;
+      this.round.phase = 'ready';
+      this.setEnabled(true);
+      this.caption('Name that song');
+      this.stageNext();
+    }).catch((e) => Errors.show(e.message || String(e)));
   },
   fillInfo() {
     const r = this.round;
@@ -739,8 +842,16 @@ const Game = {
       Player.sample('play clip ' + len + 's @' + startAt);
     } catch (e) { Errors.show('Could not play the clip.', e); return; }
     this.playUI(true, 0);
-    const started = await Player.waitFor([1], 2500);
+    let started = false, ad = false;
+    const w0 = Date.now();
+    while (Date.now() - w0 < 2500) {
+      if (this.isAd()) { ad = true; break; }
+      if (await Player.waitFor([1], 100)) { started = true; break; }
+      if (myToken !== this.token) return;
+    }
     if (myToken !== this.token) return;
+    if (started && this.isAd()) ad = true;
+    if (ad) { this.adMidClip(myToken, startAt); return; }
     if (!started) {
       r.phase = 'ready';
       this.playUI(false);
@@ -749,19 +860,6 @@ const Game = {
       return;
     }
     this.unlocked = true;
-    if (this.isAd()) {
-      try { yt.mute(); } catch (e) { /* ignore */ }
-      r.phase = 'loading';
-      this.playUI(false);
-      this.setEnabled(false);
-      if (!(await this.waitOutAd(myToken))) return;
-      try { yt.pauseVideo(); yt.seekTo(startAt, true); } catch (e) { /* ignore */ }
-      r.phase = 'ready';
-      this.setEnabled(true);
-      this.caption('Name that song');
-      toast('An ad came up and played silently. Tap Play clip.');
-      return;
-    }
     const t0 = performance.now();
     const step = () => {
       if (myToken !== this.token) return;
@@ -786,12 +884,12 @@ const Game = {
     const r = this.round, yt = Player.yt;
     clearTimeout(this.clipTimer);
     cancelAnimationFrame(this.raf);
-    try { yt.mute(); } catch (e) { /* ignore */ }
+    Player.mute();
     r.phase = 'loading';
     this.playUI(false);
     this.setEnabled(false);
     if (!(await this.waitOutAd(myToken))) return;
-    try { yt.pauseVideo(); yt.seekTo(startAt, true); } catch (e) { /* ignore */ }
+    try { Player.yt.pauseVideo(); Player.yt.seekTo(startAt, true); } catch (e) { /* ignore */ }
     r.phase = 'ready';
     this.setEnabled(true);
     this.caption('Name that song');
@@ -801,9 +899,14 @@ const Game = {
   // starting itself after an ad), silence it and stop it.
   guardTick() {
     const r = this.round;
-    if (!r || r.phase !== 'ready' || Player.state !== 1) return;
-    try { Player.yt.mute(); Player.yt.pauseVideo(); } catch (e) { /* ignore */ }
-    Player.log('guard: muted stray playback');
+    if (!r || r.phase !== 'ready') return;
+    if (Player.state === 1) {
+      try { Player.yt.mute(); Player.yt.pauseVideo(); } catch (e) { /* ignore */ }
+      Player.log('guard: muted stray playback');
+    } else if (this.isAd() && !Player.muted()) {
+      Player.mute();
+      Player.log('guard: muted an ad');
+    }
   },
   playUI(on, p) {
     const b = $('#g-play'), lbl = $('#g-play-lbl'), prog = $('#g-prog');
@@ -831,7 +934,7 @@ const Game = {
   setStart(sec) {
     if (!this.round) return;
     this.round.start = Math.max(0, sec);
-    if (this.round.phase === 'ready') { try { Player.yt.seekTo(this.round.start, true); } catch (e) { /* ignore */ } }
+    if (this.round.phase === 'ready' && Player.state !== -1) { try { Player.yt.seekTo(this.round.start, true); } catch (e) { /* ignore */ } }
     this.updateClipUI();
   },
 
@@ -892,8 +995,13 @@ const Game = {
     if (this.mode === 'dj') { setTimeout(() => this.showDJPick(), wasRevealed ? 380 : 0); return; }
     setTimeout(() => this.newRound(), wasRevealed ? 420 : 0);
   },
-  onPlayerError(code) {
+  onPlayerError(code, p) {
     // 100 = removed, 101/150 = owner blocks playing outside YouTube, 2/5 = bad id/player problem
+    const block = (v) => { const list = Store.get('blocked', []); if (v && !list.includes(v)) { list.push(v); Store.set('blocked', list); } };
+    if (p && p !== Player) {          // the song loading in the background can't play: drop it quietly
+      if (this.stage && this.stage.p === p) { block(this.stage.item && this.stage.item.v); this.dropStage(); }
+      return;
+    }
     const r = this.round;
     if (!r) return;
     if ([100, 101, 150, 2].includes(code)) {
@@ -914,7 +1022,8 @@ const Game = {
     this.stopTimers();
     this.token++;
     this.playUI(false);
-    Player.reset();
+    this.dropStage();
+    P1.reset(); P2.reset();
     this.unlocked = false;
     this.needsReload = true;
   },
