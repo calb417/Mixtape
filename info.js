@@ -88,7 +88,7 @@ const LastFM = {
       const t = cleanTitle(tr.name), k = norm(t);
       if (!k || seen.has(k)) return;
       seen.add(k);
-      out.push({ a: (tr.artist && tr.artist.name) || artist, t });
+      out.push({ a: (tr.artist && tr.artist.name) || artist, t, n: +tr.listeners || 0 });
     });
     return out;
   },

@@ -21,6 +21,7 @@ class YTPlayer {
     this.n = n;
     this.wrapId = n === 1 ? 'yt-wrap' : 'yt-wrap' + n;
     this.elId = n === 1 ? 'yt-player' : 'yt-player' + n;
+    this.builds = 0;
     this.yt = null; this.loading = null; this.state = -1;
     this.listeners = new Set(); this.errorListeners = new Set();
   }
@@ -49,17 +50,20 @@ class YTPlayer {
       }, 1000);
       const create = () => {
         const w = this.wrap();
-        if (!document.getElementById(this.elId)) {
-          const d = document.createElement('div');
-          d.id = this.elId;
-          w.appendChild(d);
-        }
+        // A fresh element (and id) for every build: reusing a torn-down player's id can leave the new one
+        // never reporting ready after the phone comes back from the lock screen.
+        w.querySelectorAll('iframe, div:not(.yt-unlock-text)').forEach((x) => x.remove());
+        this.elId = 'yt-p' + this.n + '-' + (++this.builds);
+        const d = document.createElement('div');
+        d.id = this.elId;
+        w.appendChild(d);
+        this.log('build ' + this.builds);
         this.yt = new YT.Player(this.elId, {
           width: 300,
           height: 170,
           playerVars: { playsinline: 1, controls: 1, rel: 0, modestbranding: 1, origin: location.origin },
           events: {
-            onReady: () => finish(),
+            onReady: () => { this.log('player ready'); finish(); },
             onStateChange: (e) => {
               this.state = e.data;
               this.log('state');
@@ -133,9 +137,10 @@ class YTPlayer {
   // Throw the player away, so the lock screen and Now Playing have nothing to show.
   reset() { this.teardown(); this.loading = null; }
   teardown() {
+    if (this.yt) this.log('teardown');
     try { if (this.yt) { this.yt.stopVideo(); this.yt.destroy(); } } catch (e) { /* ignore */ }
-    const old = document.getElementById(this.elId);
-    if (old && old.tagName === 'IFRAME') old.remove();
+    const w = document.getElementById(this.wrapId);
+    if (w) w.querySelectorAll('iframe, div:not(.yt-unlock-text)').forEach((x) => x.remove());
     this.yt = null;
     this.state = -1;
   }
@@ -145,7 +150,16 @@ let Player = P1;   // the one playing the current round
 
 /* ================= Song pool: playlists + filters ================= */
 const BANDS = ['Big hits', 'Well known', 'Album tracks', 'Deep cuts', 'Rarities'];
-const bandOf = (rank) => (rank < 10 ? 0 : rank < 30 ? 1 : rank < 80 ? 2 : rank < 200 ? 3 : 4);
+// Where a song sits in its artist's catalog (Last.fm listeners, most first). Big hits = the top 3, but only
+// songs within a quarter of the top song's listeners, so a one-hit wonder has just the one.
+function bandOf(top, i) {
+  if (i < 0 || i >= top.length) return 4;
+  const lead = (top[0] && top[0].n) || 0;
+  if (i < 3 && (!lead || (top[i].n || 0) >= lead * 0.25)) return 0;
+  return i < 15 ? 1 : i < 60 ? 2 : i < 200 ? 3 : 4;
+}
+// For genres, decades or nothing picked: skip artists whose biggest song has fewer Last.fm listeners than this
+function popFloor(f) { const hi = f.hits ? f.hits[1] : 1; return hi <= 1 ? 500000 : hi === 2 ? 150000 : 0; }
 const GENRES = ['rock', 'pop', 'hip-hop', 'alternative', 'indie', 'classic rock', 'metal', 'punk', 'pop punk', 'emo', 'grunge',
   'new wave', 'r&b', 'soul', 'funk', 'disco', 'dance', 'electronic', 'country', 'folk', 'singer-songwriter', 'blues', 'jazz', 'reggae'];
 const DEC = { '50s': { tag: '50s', from: 1950 }, '60s': { tag: '60s', from: 1960 }, '70s': { tag: '70s', from: 1970 }, '80s': { tag: '80s', from: 1980 },
@@ -183,8 +197,7 @@ const Pool = {
   mode(f) {
     if (f.playlists.length) return 'P';        // saved playlists, filtered
     if (f.artists.length) return 'A';          // picked artists (and albums)
-    if (!f.hits || f.hits[1] <= 1) return 'T'; // Last.fm top tracks for genres / decades / everything
-    return 'B';                                // deeper: through each genre's artists
+    return 'B';                                // well-known artists of the genres / decades / charts, then their songs
   },
   async build(f, mode, status) {
     if (mode === 'P') {
@@ -195,30 +208,24 @@ const Pool = {
     }
     if (mode === 'A') { this.arts = f.artists.map((a) => ({ a, tracks: null })); return; }
     const hard = (e) => { if (e instanceof ApiError && /key|busy|reach/i.test(e.message)) throw e; return []; };
-    if (mode === 'T') {
-      status('Gathering songs…');
-      const tags = [];
-      f.genres.forEach((g) => tags.push({ tag: g, src: 'genre' }));
-      f.decades.forEach((d) => {
-        tags.push({ tag: DEC[d].tag, src: 'decade' });
-        f.genres.forEach((g) => tags.push({ tag: `${d} ${g}`, src: 'combo' }));
-      });
-      const lists = tags.length
-        ? await Promise.all(tags.map((tg) => LastFM.tagTopTracks(tg.tag, 2).then((l) => l.map((x) => Object.assign(x, { src: tg.src }))).catch(hard)))
-        : [(await LastFM.chartTopTracks()).map((x) => Object.assign(x, { src: 'chart' }))];
-      const map = new Map();
-      lists.flat().forEach((x) => { const k = songKey(x.a, x.t); const had = map.get(k); if (!had || had.src === 'genre') map.set(k, x); });
-      this.list = shuffle([...map.values()]);
-      return;
-    }
     status('Gathering artists…');
-    let names;
-    if (f.genres.length) names = (await Promise.all(f.genres.map((g) => LastFM.tagTopArtists(g).catch(hard)))).flat();
-    else if (f.decades.length) names = (await Promise.all(f.decades.map((d) => LastFM.tagTopArtists(DEC[d].tag).catch(hard)))).flat();
-    else names = await LastFM.chartTopArtists();
-    const seen = new Set();
-    this.arts = shuffle(names.filter((n) => { const k = norm(n); if (seen.has(k)) return false; seen.add(k); return true; }))
-      .map((n) => ({ a: { name: n }, tracks: null }));
+    // Ranked lists, most popular first; "90s rock" style tags first when both a genre and a decade are picked
+    const lists = [];
+    const tagged = async (tag, src) => (await LastFM.tagTopArtists(tag).catch(hard)).slice(0, 150).map((n) => ({ n, src }));
+    if (f.genres.length && f.decades.length) {
+      for (const d of f.decades) for (const g of f.genres) lists.push(await tagged(`${d} ${g}`, 'decade'));
+      for (const g of f.genres) lists.push(await tagged(g, 'genre'));
+    } else if (f.genres.length) {
+      for (const g of f.genres) lists.push(await tagged(g, 'genre'));
+    } else if (f.decades.length) {
+      for (const d of f.decades) lists.push(await tagged(DEC[d].tag, 'decade'));
+    } else {
+      lists.push((await LastFM.chartTopArtists()).map((n) => ({ n, src: 'chart' })));
+    }
+    // Interleave the lists by rank so every tag gets its best artists near the front
+    const seen = new Set(), out = [];
+    for (let i = 0; i < 200; i++) lists.forEach((l) => { const x = l[i]; if (x && !seen.has(norm(x.n))) { seen.add(norm(x.n)); out.push(x); } });
+    this.arts = out.map((x) => ({ a: { name: x.n }, src: x.src, tracks: null }));
   },
   async albumTitles(art) {
     if (art._titles) return art._titles;
@@ -229,7 +236,7 @@ const Pool = {
   async artistTracks(e, f, mode) {
     if (e.tracks) return e.tracks;
     const a = e.a;
-    const range = f.hits || [0, 2];
+    const range = f.hits || (mode === 'A' ? [0, 2] : [0, 1]);
     let list;
     if (mode === 'A' && a.albums && a.albums.length) {
       const sets = await Promise.all(a.albums.map((al) => MB.albumTracks(al.id, 1).catch(() => ({ tracks: [] }))));
@@ -240,24 +247,26 @@ const Pool = {
       if (f.hits) {
         const top = await LastFM.topTracks(a.name).catch(() => []);
         const rank = new Map(top.map((x, i) => [norm(x.t), i]));
-        const inBand = list.filter((x) => { const r = rank.has(norm(x.t)) ? bandOf(rank.get(norm(x.t))) : 4; return r >= range[0] && r <= range[1]; });
+        const inBand = list.filter((x) => { const r = rank.has(norm(x.t)) ? bandOf(top, rank.get(norm(x.t))) : 4; return r >= range[0] && r <= range[1]; });
         if (inBand.length) list = inBand;
       }
     } else {
       const top = await LastFM.topTracks(a.name);
-      list = top.filter((x, i) => bandOf(i) >= range[0] && bandOf(i) <= range[1]);
-      if (!list.length && top.length) list = range[0] >= 2 ? top.slice(Math.floor(top.length / 2)) : top.slice(0, 10);
-      list = list.map((x) => ({ a: x.a, t: x.t, src: 'artist' }));
+      if (mode === 'B' && popFloor(f) && !((top[0] && top[0].n) >= popFloor(f))) { e.tracks = []; return e.tracks; }   // not well known enough
+      list = top.filter((x, i) => { const b = bandOf(top, i); return b >= range[0] && b <= range[1]; });
+      if (!list.length && top.length && mode === 'A') list = range[0] >= 2 ? top.slice(Math.floor(top.length / 2)) : top.slice(0, 3);
+      list = list.map((x) => ({ a: x.a, t: x.t, src: e.src || 'artist' }));
     }
     e.tracks = shuffle(list);
     return e.tracks;
   },
   async candidate(f, mode) {
-    if (mode === 'P' || mode === 'T') return this.list.length ? this.list.pop() : null;
-    for (let tries = 0; tries < 15; tries++) {
+    if (mode === 'P') return this.list.length ? this.list.pop() : null;
+    for (let tries = 0; tries < 25; tries++) {
       const live = this.arts.filter((e) => !e.done);
       if (!live.length) return null;
-      const e = live[Math.floor(Math.random() * live.length)];
+      // Picked artists: any of them. Otherwise lean toward the most popular artists in the list.
+      const e = live[Math.floor((mode === 'A' ? Math.random() : Math.pow(Math.random(), 2)) * live.length)];
       let tracks;
       try { tracks = await this.artistTracks(e, f, mode); }
       catch (err) { if (err instanceof ApiError && /key|busy|reach/i.test(err.message)) throw err; e.done = true; continue; }
@@ -282,7 +291,7 @@ const Pool = {
       if (f.hits) {
         const top = await LastFM.topTracks(c.a).catch(() => []);
         const i = top.findIndex((x) => norm(x.t) === norm(cleanTitle(c.t)));
-        const b = i < 0 ? 4 : bandOf(i);
+        const b = bandOf(top, i);
         if (b < f.hits[0] || b > f.hits[1]) return null;
       }
     }
@@ -293,7 +302,7 @@ const Pool = {
         y = await Year.get(c.a, c.t).catch(() => 0);
       }
       if (y) { if (!f.decades.some((d) => y >= DEC[d].from && y < DEC[d].from + 10)) return null; }
-      else if (!(c.src === 'decade' || c.src === 'combo')) return null;
+      else if (c.src !== 'decade') return null;
     }
     let v = c.v;
     if (!v) {
@@ -339,8 +348,9 @@ const Pool = {
     if (!this.building) { this.building = this.build(f, mode, () => {}); this.building.catch(() => { if (gen === this.gen) this.building = null; }); }
     await this.building;
     const fresh = (c) => !this.seen.has(songKey(c.a, c.t));
-    if (mode === 'P' || mode === 'T') return shuffle(this.list.filter(fresh)).slice(0, n);
-    const arts = shuffle(this.arts.filter((e) => !e.done)).slice(0, 8);
+    if (mode === 'P') return shuffle(this.list.filter(fresh)).slice(0, n);
+    const live = this.arts.filter((e) => !e.done);
+    const arts = mode === 'A' ? shuffle(live).slice(0, 8) : shuffle(live.slice(0, 30)).slice(0, 10);
     const out = [];
     for (const e of arts) {
       const tr = await this.artistTracks(e, f, mode).catch(() => []);
@@ -593,7 +603,12 @@ const Game = {
   setEnabled(on) {
     ['g-play', 'g-reveal', 'g-more'].forEach((id) => { const el = document.getElementById(id); if (el) el.disabled = !on; });
   },
-  caption(t) { const c = $('#g-cap'); if (c) c.textContent = t; },
+  caption(t) {
+    const c = $('#g-cap');
+    if (c) c.textContent = t;
+    const st = document.querySelector('#g-djart .djst');
+    if (st) st.textContent = /^Name that song/.test(t) ? '' : t;
+  },
 
   /* ---- clip length ---- */
   setClipIndex(i, fromSlider) {
@@ -679,13 +694,13 @@ const Game = {
         res = st.ready ? st.res : await st.promise;
         if (!res) res = await this.prepare(Player, item, (t) => this.caption(t), () => myToken === this.token);
       } else {
-        this.dropStage();
+        if (this.mode !== 'dj') this.dropStage();   // DJ: keep the random song ready for the next Random pick
         await Player.load();
         if (myToken !== this.token) return;
         res = await this.prepare(Player, item, (t) => this.caption(t), () => myToken === this.token);
       }
     } catch (e) {
-      Errors.show(e.message || String(e));
+      if (myToken === this.token) this.loadFailed(e);
       return;
     }
     if (!res || myToken !== this.token || !this.round || this.round.item !== item) return;
@@ -731,7 +746,7 @@ const Game = {
   },
   // Start loading the next song in the other player (Guess mode only).
   stageNext() {
-    if (this.mode !== 'guess' || this.stage) return;
+    if (this.stage) return;
     const p = Player === P1 ? P2 : P1;
     Pool.prefetch();
     const ahead = Pool.ahead;
@@ -754,6 +769,16 @@ const Game = {
     const st = this.stage;
     this.stage = null;
     if (st) { st.live = () => false; if (st.p !== Player) st.p.stop(); }
+  },
+  // The player didn't come up: rebuild it and let Play clip try again instead of leaving a stuck screen.
+  loadFailed(e) {
+    Player.log('load failed: ' + (e && e.message ? e.message.slice(0, 40) : e));
+    Player.reset();
+    if (this.round) this.round.phase = 'failed';
+    this.setEnabled(false);
+    const b = $('#g-play');
+    if (b) b.disabled = false;
+    this.caption("The player didn't load. Tap Play clip to try again.");
   },
   isAd() { const r = this.round; return !!(r && Player.adPlaying(r.item.v, r.dur)); },
   // Keep the player running, muted, until the real song is playing. Returns false if the round moved on.
@@ -793,7 +818,7 @@ const Game = {
       this.setEnabled(true);
       this.caption('Name that song');
       this.stageNext();
-    }).catch((e) => Errors.show(e.message || String(e)));
+    }).catch((e) => { if (myToken === this.token) this.loadFailed(e); });
   },
   fillInfo() {
     const r = this.round;
@@ -820,7 +845,7 @@ const Game = {
     };
     setImg(back);
     if (this.mode === 'dj') {
-      setImg(dj, `<div class="djcap"><b>${esc(r.item.t)}</b><span>${esc(r.item.a)}</span></div>`);
+      setImg(dj, `<div class="djst"></div><div class="djcap"><b>${esc(r.item.t)}</b><span>${esc(r.item.a)}</span></div>`);
       const cap = dj.querySelector('.djcap');
       if (cap) cap.innerHTML = `<b>${esc(r.item.t)}</b><span>${esc(r.item.a)}${m.year ? ' · ' + esc(m.year) : ''}</span>`;
     }
@@ -828,6 +853,7 @@ const Game = {
 
   async playClip() {
     const r = this.round;
+    if (r && r.phase === 'failed') { this.restoreRound(); return; }
     if (!r || r.phase === 'loading' || r.phase === 'revealed') return;
     const yt = Player.yt;
     this.stopTimers();
@@ -1023,6 +1049,7 @@ const Game = {
     this.token++;
     this.playUI(false);
     this.dropStage();
+    Player.log('app hidden: players dropped');
     P1.reset(); P2.reset();
     this.unlocked = false;
     this.needsReload = true;
@@ -1030,7 +1057,8 @@ const Game = {
   onShow() {
     if (!this.needsReload) return;
     this.needsReload = false;
-    if (this.round && this.round.phase !== 'revealed') this.restoreRound();
+    Player.log('app back on screen');
+    setTimeout(() => { if (this.round && this.round.phase !== 'revealed' && currentView === Views.game) this.restoreRound(); }, 500);
   },
 
   /* ---- DJ mode ---- */
@@ -1047,6 +1075,7 @@ const Game = {
     const q = $('#dj-q');
     if (q) q.value = '';
     this.renderDJResults('');
+    Player.load().then(() => this.stageNext()).catch(() => {});
   },
   // Under the search box: a few random songs from the current pool (playlist songs, or Last.fm picks)
   async renderDJResults(query) {
@@ -1216,8 +1245,8 @@ const Game = {
           const h = draft.hits;
           $b('[data-hits]').innerHTML = `<button class="${h ? '' : 'on'}" data-x="hany">Any</button>` + BANDS.map((n, i) => `<button class="${h && i >= h[0] && i <= h[1] ? 'on' : ''}" data-x="hit" data-i="${i}">${n}</button>`).join('');
           $b('[data-hitsnote]').textContent = h
-            ? `${this.hitsNote(h)} Big hits are an artist's top 10 on Last.fm; deep cuts and rarities are songs far fewer people play. Tap more steps to widen the range.`
-            : 'Any: playlists play every song, artists play their hits through album tracks, and genres and decades play their best-known songs.';
+            ? `${this.hitsNote(h)} Big hits are an artist's top 3 songs on Last.fm (just the top one for a one-hit wonder); well known is the rest of their top 15. With genres, decades or nothing picked, songs come from well-known artists. Tap more steps to widen the range.`
+            : 'Any: playlists play every song, picked artists play their hits through album tracks, and genres and decades play big hits and well-known songs by well-known artists.';
         };
         const all = () => { renderNow(); renderPl(); renderArtists(); renderGenres(); renderDecades(); renderHits(); };
         all();
