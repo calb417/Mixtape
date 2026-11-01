@@ -1,9 +1,9 @@
 'use strict';
 /* Sync with a code, through the Mixtape relay (relay/worker.js on Cloudflare). Off until CONFIG.RELAY_URL
    is filled in. Two phones that use the same code share My Artists, the Concert Diary, playlists, the
-   game's pool and song memory, and settings. Needs app.js loaded first. */
+   game's pool and song memory, settings, Playlist Builder lists and the Google sign-in. Needs app.js loaded first. */
 
-const SYNC_KEYS = ['settings', 'myArtists', 'diary', 'pools', 'filters', 'blocked', 'songs', 'recent'];
+const SYNC_KEYS = ['settings', 'myArtists', 'diary', 'pools', 'filters', 'blocked', 'songs', 'recent', 'mixes', 'google'];
 const WORDS_A = ['amber', 'blue', 'brave', 'calm', 'cosmic', 'crimson', 'electric', 'golden', 'happy', 'indigo', 'jolly', 'lucky', 'mellow', 'neon', 'quiet', 'rapid', 'silver', 'sunny', 'velvet', 'wild'];
 const WORDS_B = ['falcon', 'guitar', 'tiger', 'comet', 'harbor', 'piano', 'river', 'rocket', 'meadow', 'tempo', 'vinyl', 'echo', 'drum', 'lantern', 'canyon', 'otter', 'maple', 'anchor', 'tuba', 'zebra'];
 
@@ -180,11 +180,148 @@ const Sync = {
   stop() { Store.del('syncCode'); clearTimeout(this.timer); },
 };
 
+/* ---------------- Google sign-in (through the relay) ----------------
+   The relay keeps Google's long-lived permission; the app keeps only its own sign-in key ("session")
+   and asks the relay for a fresh one-hour pass when it needs one. The key syncs, so both phones on one
+   sync code use the same Google account. */
+const Google = {
+  tok: null,
+  sess() { const g = Store.get('google', null); return g && g.session ? g : null; },
+  on() { return !!this.sess() && !!Sync.url(); },
+  email() { const g = this.sess(); return (g && g.email) || ''; },
+  forget() { Store.del('google'); try { localStorage.removeItem('mixtape.gToken'); } catch (e) { /* ignore */ } this.tok = null; },
+  async post(path, body) {
+    return Sync.req(path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  },
+  // A YouTube pass good for about an hour
+  async token(force) {
+    const g = this.sess();
+    if (!g || !Sync.url()) throw new ApiError('Sign in with Google first: Settings → YouTube Music → Sign in with Google.');
+    const c = this.tok || Store.get('gToken', null);
+    if (!force && c && c.s === g.session && c.exp > Date.now() + 120000) { this.tok = c; return c.t; }
+    if (this._pending) return this._pending;
+    this._pending = (async () => {
+      const r = await this.post('/google/token', { session: g.session });
+      const j = await r.json().catch(() => ({}));
+      if (r.status === 401) { this.forget(); throw new ApiError('The Google sign-in has ended. Sign in again: Settings → YouTube Music → Sign in with Google.'); }
+      if (!r.ok || !j.access_token) throw new ApiError('Google sign-in: ' + (j.error || ('the relay answered ' + r.status)));
+      this.tok = { s: g.session, t: j.access_token, exp: Date.now() + ((j.expires_in || 3600) - 60) * 1000 };
+      try { localStorage.setItem('mixtape.gToken', JSON.stringify(this.tok)); } catch (e) { /* ignore */ }
+      if (j.email && j.email !== g.email) Store.set('google', Object.assign({}, g, { email: j.email }));
+      return j.access_token;
+    })();
+    try { return await this._pending; } finally { this._pending = null; }
+  },
+
+  // Signing in: Google's page opens in the browser; the app checks with the relay until it's done
+  start(onDone) {
+    if (!Sync.url()) { Errors.show('Google sign-in needs the relay.'); return; }
+    const state = [...crypto.getRandomValues(new Uint8Array(24))].map((b) => b.toString(16).padStart(2, '0')).join('');
+    Store.set('gPending', { state, at: Date.now() }, true);
+    const url = `${Sync.url()}/google/start?s=${state}`;
+    const w = window.open(url, '_blank');
+    let timer = null, closed = false, sheetOpen = true;
+    // Closing the panel stops the regular checks, but coming back to Mixtape still finishes the sign-in
+    const finish = (ok) => {
+      if (closed) return;
+      closed = true;
+      clearInterval(timer);
+      document.removeEventListener('visibilitychange', onShow);
+      if (ok) { toast('Signed in' + (this.email() ? ' as ' + this.email() : '')); if (sheetOpen) closeSheet(); if (onDone) onDone(); }
+    };
+    const check = async () => {
+      try { if (await this.claim()) finish(true); }
+      catch (e) { /* keep waiting; the relay may not have it yet */ }
+    };
+    const onShow = () => { if (document.visibilityState === 'visible') check(); };
+    document.addEventListener('visibilitychange', onShow);
+    const started = Date.now();
+    timer = setInterval(() => { if (Date.now() - started > 15 * 60000) clearInterval(timer); else check(); }, 2500);
+    const closeSheet = Sheets.open({
+      title: 'Sign in with Google',
+      html: `<ol><li>Google's page ${w ? 'opened' : 'opens when you tap the button below'}. Pick the account that has your YouTube Music${' '}(on a brand account, pick it on the next screen).</li>
+          <li>If Google says <b>"Google hasn't verified this app"</b>, tap <b>Advanced</b> → <b>Go to Mixtape (unsafe)</b>. That's normal for a personal app.</li>
+          <li>Tick <b>every box</b> and tap <b>Continue</b>.</li>
+          <li>When it says <b>Signed in</b>, close that page and come back here. This finishes by itself.</li></ol>
+        <p class="muted small" data-g="st">Waiting for Google…</p>
+        <div class="row sheet-actions"><button class="btn" data-g="open">Open Google's page</button><button class="btn primary" style="flex:1" data-g="check">I'm back, check now</button></div>`,
+      onMount(body) {
+        body.querySelector('[data-g=open]').onclick = () => { if (!window.open(url, '_blank')) location.href = url; };
+        body.querySelector('[data-g=check]').onclick = async () => {
+          body.querySelector('[data-g=st]').textContent = 'Checking…';
+          await check();
+          if (!closed) body.querySelector('[data-g=st]').textContent = "Not finished yet. Finish on Google's page, then tap check again.";
+        };
+      },
+      onClose: () => { sheetOpen = false; clearInterval(timer); },
+    });
+  },
+  async claim() {
+    const p = Store.get('gPending', null);
+    if (!p || Date.now() - p.at > 20 * 60000) return false;
+    const r = await this.post('/google/claim', { state: p.state });
+    if (r.status === 404) return false;
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j.session) throw new ApiError('Google sign-in: ' + (j.error || r.status));
+    Store.set('google', { session: j.session, email: j.email || '' });
+    Store.del('gPending');
+    this.tok = null;
+    Sync.push().catch(() => {});      // the other phone gets the sign-in too
+    return true;
+  },
+  async signOut() {
+    const g = this.sess();
+    this.forget();
+    if (g) { try { await this.post('/google/signout', { session: g.session }); } catch (e) { /* signed out here either way */ } }
+    Sync.push().catch(() => {});
+  },
+  // Your own YouTube playlists (1 unit per 50)
+  async myPlaylists() {
+    const out = [];
+    let pageToken = '', guard = 0;
+    do {
+      const j = await YTData.auth('GET', 'playlists', { part: 'snippet,contentDetails,status', mine: 'true', maxResults: 50, pageToken });
+      (j.items || []).forEach((p) => out.push({ id: p.id, name: (p.snippet && p.snippet.title) || 'Untitled', count: (p.contentDetails && p.contentDetails.itemCount) || 0, privacy: (p.status && p.status.privacyStatus) || '' }));
+      pageToken = j.nextPageToken || '';
+      guard++;
+    } while (pageToken && guard < 20);
+    return out;
+  },
+  // A sheet that lists your playlists; onPick({ id, name, count })
+  pickPlaylist(title, onPick) {
+    Sheets.open({
+      title: title || 'Your playlists',
+      html: '<input class="field slim" data-y="f" placeholder="Find" autocomplete="off" autocapitalize="off" spellcheck="false" style="width:100%; margin-bottom:6px"><div data-y="list"><p class="muted">Loading your playlists…</p></div>',
+      onMount: async (body, close) => {
+        let all = [];
+        const draw = () => {
+          const f = body.querySelector('[data-y=f]').value.trim();
+          const list = f ? all.filter((p) => fuzzyScore(f, p.name) > 0) : all;
+          body.querySelector('[data-y=list]').innerHTML = list.length ? '<div class="rows">' + list.map((p) => `<button class="rowbtn" data-y="pick" data-id="${esc(p.id)}"><span>${esc(p.name)}</span><span class="muted small">${p.count} song${p.count === 1 ? '' : 's'}${p.privacy === 'private' ? ' · private' : ''} ${ICON.chev}</span></button>`).join('') + '</div>'
+            : `<p class="muted">${all.length ? 'No matches.' : 'No playlists in this account yet.'}</p>`;
+        };
+        body.querySelector('[data-y=f]').addEventListener('input', draw);
+        body.addEventListener('click', (e) => {
+          const b = e.target.closest('[data-y=pick]');
+          if (!b) return;
+          const p = all.find((x) => x.id === b.dataset.id);
+          close();
+          if (p) onPick(p);
+        });
+        try { all = await this.myPlaylists(); all.sort((a, b) => norm(a.name).localeCompare(norm(b.name))); draw(); }
+        catch (e) { body.querySelector('[data-y=list]').innerHTML = `<p class="muted">${esc(e.message || e)}</p>`; if (!(e instanceof ApiError)) Errors.show(e.message, e); }
+      },
+    });
+  },
+};
+
 // Sync when Mixtape opens, when it comes back on screen, and try to save on the way out.
 document.addEventListener('DOMContentLoaded', () => {
   if (!Sync.url()) return;
   Sync.ping().catch(() => {});
   Sync.run(true);
+  // A sign-in that finished while Mixtape was closed
+  if (Store.get('gPending', null)) Google.claim().then((ok) => { if (ok) { toast('Signed in with Google'); if (currentView === Views.settings || currentView === Views.builder) route(); } }).catch(() => {});
 });
 document.addEventListener('visibilitychange', () => {
   if (!Sync.on()) return;

@@ -94,6 +94,19 @@ const LastFM = {
     });
     return out;
   },
+  // Songs that match what's typed (free, close matches)
+  async searchTracks(q) {
+    const j = await this.call('track.search', { track: q, limit: 20 });
+    const seen = new Set(), out = [];
+    this.arr(j && j.results && j.results.trackmatches && j.results.trackmatches.track).forEach((tr) => {
+      if (!tr || !tr.name || !tr.artist || NOT_STUDIO.test(tr.name)) return;
+      const t = cleanTitle(tr.name), k = songKey(tr.artist, t);
+      if (seen.has(k)) return;
+      seen.add(k);
+      out.push({ a: tr.artist, t, n: +tr.listeners || 0 });
+    });
+    return out;
+  },
   async tagTopTracks(tag, pages = 2) {
     const out = [];
     for (let page = 1; page <= pages; page++) {
@@ -375,16 +388,26 @@ const SongFinder = {
   },
   forget() { this.idx = null; },
   remember(a, t, v) { const m = this.load(); m[songKey(a, t)] = v; Store.set('songs', m, true); },
-  async find(a, t) {
+  // Is it already known (no lookup needed)?
+  known(a, t, clean) {
     const m = this.load(), k = songKey(a, t);
+    if (clean) return m[k + '|clean'] !== undefined;
+    return m[k] !== undefined || this.poolIndex().has(k);
+  },
+  // opts.clean: look for the clean or radio-edit version (remembered separately)
+  async find(a, t, opts = {}) {
+    const m = this.load(), k = songKey(a, t) + (opts.clean ? '|clean' : '');
     this.looked = false;
     if (m[k] !== undefined) return m[k] || null;
-    const fromPool = this.poolIndex().get(k);
-    if (fromPool) return fromPool;
-    if (this.used() >= DAILY_LOOKUPS) throw new ApiError(`Today's ${DAILY_LOOKUPS} song lookups are used up. Playlist pools still work. The count resets overnight (midnight Pacific).`);
+    if (!opts.clean) {
+      const fromPool = this.poolIndex().get(k);
+      if (fromPool) return fromPool;
+    }
+    if (this.used() >= DAILY_LOOKUPS) throw new LimitError(`Today's ${DAILY_LOOKUPS} song lookups are used up. Playlist pools still work. The count resets overnight (midnight Pacific).`);
     this.count();
     this.looked = true;
-    const j = await YTData.get('search', { part: 'snippet', type: 'video', videoEmbeddable: 'true', maxResults: 10, q: `${a} ${t}` });
+    const j = await YTData.get('search', { part: 'snippet', type: 'video', videoEmbeddable: 'true', maxResults: 10, q: `${a} ${t}` + (opts.clean ? ' clean' : '') });
+    const cleanRe = /\b(clean|radio edit|radio version|edited)\b/i;
     const bad = /\b(live|cover|karaoke|remix|instrumental|sped up|slowed|8d|reaction|tutorial|lesson|lyrics? video|full album|concert)\b/i;
     let best = null, bestScore = 0;
     (j.items || []).forEach((it, i) => {
@@ -397,6 +420,8 @@ const SongFinder = {
       let s = ts * 0.6 + as * 0.4 - i * 0.01;
       if (/ - Topic$/i.test(sn.channelTitle || '')) s += 0.2;
       if (bad.test(raw) && !bad.test(t)) s -= 0.4;
+      if (opts.clean && cleanRe.test(raw)) s += 0.35;
+      if (opts.clean && /explicit/i.test(raw)) s -= 0.3;
       if (s > bestScore) { bestScore = s; best = c.v; }
     });
     m[k] = best || '';
@@ -453,6 +478,8 @@ const Cards = {
       if (m) { const p = m.parentElement.previousElementSibling; if (p) p.classList.toggle('clamp'); m.textContent = p && p.classList.contains('clamp') ? 'More' : 'Less'; }
       const o = e.target.closest('[data-open]');
       if (o) window.open(o.dataset.open, '_blank');
+      const mx = e.target.closest('[data-mix]');
+      if (mx && typeof Builder !== 'undefined') Builder.fromCard(mx.dataset);
       const y = e.target.closest('[data-ytm]');
       if (y) openYTMusic(y.dataset.ytm, y.dataset.q);
       const my = e.target.closest('[data-myart]');
@@ -492,7 +519,7 @@ const Cards = {
       <div data-tags></div>
       <div data-similar></div>
       <p class="muted small">Setlists and upcoming shows arrive with the Setlist Study Guide and Concerts Near Me updates.</p>
-      <div class="card-actions"><button class="btn small" data-myart="${esc(name)}"></button><button class="btn small" data-ytm="" data-q="${esc(name)}">${ICON.out} YouTube Music</button></div>`;
+      <div class="card-actions"><button class="btn small" data-myart="${esc(name)}"></button><button class="btn small" data-mix="artist" data-name="${esc(name)}">+ Playlist</button><button class="btn small" data-ytm="" data-q="${esc(name)}">${ICON.out} YouTube Music</button></div>`;
     this.myButton(box);
     const lf = await LastFM.artistInfo(name).catch((e) => { if (/key/i.test(e.message)) throw e; return null; });
     const realName = (lf && lf.name) || name;
@@ -610,7 +637,7 @@ const Cards = {
     this.wire(box);
     box.innerHTML = `<div class="hero"><div class="hero-ph" data-ph>${o.art ? `<img src="${esc(o.art)}" alt="">` : ''}</div>
       <div><div class="hero-name">${esc(o.title || '')}</div><button class="hero-meta link" ${this.attrs('artist', { name: o.artist })}>${esc(o.artist || '')}</button><div class="hero-meta" data-meta></div></div></div>
-      <h3>Tracks</h3><div data-tracks><p class="muted">Loading…</p></div><div data-ratings></div><div data-about></div>`;
+      <h3>Tracks</h3><div data-tracks><p class="muted">Loading…</p></div><div data-mixbtn></div><div data-ratings></div><div data-about></div>`;
     let rg = o.rg;
     if (!rg) {
       const j = await MB.get('release-group', { query: `releasegroup:${MB.q(o.title)} AND artist:${MB.q(o.artist)}`, limit: 10 });
@@ -634,6 +661,7 @@ const Cards = {
     const at = await MB.albumTracks(rg);
     this.set(box, '[data-meta]', esc([yearOf(g && g['first-release-date']) || yearOf(at.date) || '', at.label].filter(Boolean).join(' · ')));
     const artistName = g ? MB.credit(g['artist-credit']) : o.artist;
+    if (at.tracks.length) this.set(box, '[data-mixbtn]', `<div class="card-actions"><button class="btn small" data-mix="album" data-rg="${esc(rg)}" data-artist="${esc(artistName)}" data-title="${esc((g && g.title) || o.title || '')}">+ Add the album to a playlist</button></div>`);
     this.set(box, '[data-tracks]', at.tracks.length ? '<div class="rows">' + at.tracks.map((t, i) => `<button class="rowbtn" ${this.attrs('song', { artist: artistName, title: t.t })}><span><span class="num">${i + 1}</span>${esc(t.t)}</span><span class="muted mono">${t.len ? fmtTime(t.len / 1000) : ''}</span></button>`).join('') + '</div>' : '<p class="muted">No track list found.</p>');
     const q = g ? MB.wikidata(g.relations) : '';
     if (!q) return;
@@ -657,7 +685,7 @@ const Cards = {
       <div class="facts" data-facts><p class="muted">Loading…</p></div>
       <div data-writers></div>
       <div data-about></div><div class="chips" data-tags></div>
-      <div class="card-actions"><button class="btn small" data-open="https://genius.com/search?q=${encodeURIComponent(artist + ' ' + title)}">Lyrics</button>
+      <div class="card-actions"><button class="btn small" data-mix="song" data-artist="${esc(artist)}" data-title="${esc(title)}" data-v="${esc(o.v || '')}">+ Playlist</button><button class="btn small" data-open="https://genius.com/search?q=${encodeURIComponent(artist + ' ' + title)}">Lyrics</button>
         <button class="btn small" data-ytm="${esc(o.v || '')}" data-q="${esc(artist + ' ' + title)}">${ICON.out} YouTube Music</button></div>
       <p class="muted small">How often it's played on the current tour arrives with the Setlist Study Guide update.</p>`;
     const facts = { album: '', rg: '', year: 0, len: 0 };

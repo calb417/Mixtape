@@ -1262,6 +1262,7 @@ const Game = {
       html: `<p class="muted small" style="margin-top:0">Picks narrow each other: a playlist plus 90s plays that playlist's 90s songs. Several in one row widen it (70s + 90s). Nothing picked plays popular songs from any era.</p>
         <div class="now" data-now></div>
         <h3>Playlists</h3><div data-pl></div>
+        ${typeof Google !== 'undefined' && Google.on() ? '<button class="btn small" style="margin-top:10px" data-x="mine">Pick one of yours</button>' : ''}
         <details class="add-pl"><summary>Add a YouTube Music playlist</summary>
           <input class="field" data-x="link" placeholder="Paste the playlist link" autocomplete="off" autocapitalize="off" spellcheck="false">
           <div class="row" style="margin-top:8px"><button class="btn small primary" data-x="add">Add playlist</button><button class="link-btn" data-x="how">How to get the link</button></div>
@@ -1393,6 +1394,18 @@ const Game = {
               addedPlaylist = true;
               renderPl(); renderNow();
               toast(`Added ${r.name}: ${r.count} songs`);
+            }
+            if (x === 'mine') {
+              Google.pickPlaylist('Add one of your playlists', async (p) => {
+                try {
+                  toast(`Reading ${p.name}…`);
+                  const r = await fetchPool(p.id, p.name);
+                  if (!draft.playlists.includes(p.id)) draft.playlists.push(p.id);
+                  addedPlaylist = true;
+                  renderPl(); renderNow();
+                  toast(`Added ${r.name}: ${r.count} songs`);
+                } catch (err) { status(''); Errors.show(err.message || String(err), err instanceof ApiError ? '' : err); }
+              });
             }
             if (x === 'apick') {
               const a = aList[parseInt(b.dataset.i, 10)];

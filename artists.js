@@ -167,6 +167,7 @@ function openBatchAdd(onDone) {
     title: 'Add from a playlist',
     html: `<p class="muted small" style="margin-top:0">Pick a playlist and Mixtape lists every artist in it, with how many songs each has there.</p>
       <div data-b="src"></div>
+      ${typeof Google !== 'undefined' && Google.on() ? '<button class="btn small" style="margin-top:10px" data-b="mine">Pick one of yours</button>' : ''}
       <details class="add-pl"><summary>Use another YouTube Music playlist</summary>
         <input class="field" data-b="link" placeholder="Paste the playlist link" autocomplete="off" autocapitalize="off" spellcheck="false">
         <div class="row" style="margin-top:8px"><button class="btn small primary" data-b="read">Read playlist</button></div>
@@ -219,6 +220,12 @@ function openBatchAdd(onDone) {
             b.disabled = false;
             b.textContent = 'Read playlist';
             showPick(name, items);
+          }
+          if (k === 'mine') {
+            Google.pickPlaylist('Pick a playlist', async (p) => {
+              try { toast(`Reading ${p.name}…`); showPick(p.name, await YTData.playlistItems(p.id)); }
+              catch (err) { Errors.show(err.message || String(err), err instanceof ApiError ? '' : err); }
+            });
           }
           if (k === 'tick') { const r = rows[parseInt(b.dataset.i, 10)]; if (r && !r.have) r.on = !r.on; drawPick($b('pick').dataset.title); }
           if (k === 'all') { rows.forEach((r) => { if (!r.have) r.on = true; }); drawPick($b('pick').dataset.title); }

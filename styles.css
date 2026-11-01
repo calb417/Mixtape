@@ -353,3 +353,23 @@ input[type=date].field { -webkit-appearance: none; appearance: none; display: bl
 .bar { height: 10px; background: var(--surface2); border-radius: 5px; overflow: hidden; }
 .bar i { display: block; height: 100%; background: var(--accent); border-radius: 5px; }
 .bar-n { font-family: var(--mono); font-size: 12px; color: var(--muted); text-align: right; }
+/* Playlist Builder */
+.note-card { margin: 10px 16px 0 16px; background: var(--surface); border: 1px solid var(--surface2); border-left: 3px solid var(--accent); border-radius: 14px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; font-size: 14px; }
+.note-card > span { color: var(--muted); font-size: 13px; line-height: 1.4; }
+.note-card .row { gap: 8px; flex-wrap: wrap; }
+.note-card .btn { align-self: flex-start; }
+.mx-name { font-family: var(--display); font-weight: 600; font-size: 18px; height: 48px; }
+.mx-add .btn { flex: 1; padding: 0 8px; font-size: 13.5px; }
+.mx-row { display: flex; align-items: center; gap: 2px; border-bottom: 1px solid var(--surface2); background: var(--surface); }
+.mx-row:last-child { border-bottom: none; }
+.mx-row.dragging { background: var(--surface2); box-shadow: 0 6px 18px rgba(0,0,0,0.35); position: relative; z-index: 2; }
+.grip { flex: 0 0 40px; height: 52px; display: flex; align-items: center; justify-content: center; color: var(--faint); font-size: 20px; touch-action: none; user-select: none; -webkit-user-select: none; cursor: grab; }
+.mx-main { flex: 1; min-width: 0; display: flex; align-items: center; gap: 8px; padding: 8px 4px; background: none; border: none; text-align: left; color: var(--text); }
+.mx-main .num { flex: 0 0 26px; font-family: var(--mono); font-size: 11.5px; color: var(--faint); }
+.mx-main .tx { min-width: 0; display: flex; flex-direction: column; }
+.mx-main .n { font-weight: 600; font-size: 14.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mx-main .c { font-size: 12.5px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.icon-btn.sm { width: 36px; height: 36px; flex: 0 0 36px; border: none; background: none; color: var(--faint); margin-right: 6px; }
+.tapcard { background: none; border: none; padding: 0; text-align: left; color: inherit; flex: 1; min-width: 0; }
+.tapcard .n, .tapcard .c { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.li .seg button { padding: 0 10px; font-size: 13px; }

@@ -14,7 +14,7 @@ const CONFIG = {
 // =====================================================================
 
 // The version lives in index.html (<meta name="mixtape-version">) so the update check can compare it.
-const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.2';
+const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.3';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -248,7 +248,7 @@ const Sheets = {
 const HELP = {
   home: {
     title: 'Welcome to Mixtape',
-    html: `<p>Each tile opens a section. Guess the Intro is ready now; the other sections arrive in the next updates.</p>
+    html: `<p>Each tile opens a section. Tiles marked SOON arrive in later updates.</p>
       <ul><li><b>?</b> on any screen shows how that screen works.</li>
       <li>The gear opens Settings: colors, keeping the screen on, backups.</li>
       <li>The screen stays on while Mixtape is open. Press the side button to lock it as usual.</li></ul>`,
@@ -269,6 +269,7 @@ const HELP = {
     html: `<ol><li>In YouTube Music, open the playlist → <b>⋯</b> → <b>Edit playlist</b> → set <b>Privacy</b> to <b>Unlisted</b> (or Public).</li>
       <li>Tap <b>⋯</b> → <b>Share</b> → <b>Copy link</b>.</li>
       <li>Paste the link in Song pool → Add a YouTube Music playlist.</li></ol>
+      <p>Signed in with Google (Settings)? Skip all that: tap <b>Pick one of yours</b> and choose from your playlists, private ones included.</p>
       <p>Mixtape saves the song list on this phone. Tap <b>Refresh</b> after you change the playlist.</p>`,
   },
   diary: {
@@ -294,8 +295,9 @@ const HELP = {
     title: 'Settings',
     html: `<ul><li><b>Appearance</b>: pick any accent and background color. Text adjusts to stay readable. Reset goes back to black and orange.</li>
       <li><b>Keep screen on</b>: the phone won't dim while Mixtape is open.</li>
-      <li><b>Song lookups</b>: songs that come from artists, genres or decades are matched to YouTube once (100 a day) and then remembered.</li>
-      <li><b>Backup</b>: saves everything on this phone to one file you can load later. Sync with a code comes with the next update.</li></ul>`,
+      <li><b>YouTube Music</b>: sign in with Google once to save playlists and to use private playlists in the game. Phones that share a sync code share the sign-in.</li>
+      <li><b>YouTube use today</b>: Google gives Mixtape 10,000 units a day. Looking a song up costs 100 (only once; then it's remembered), adding a song to a playlist costs 50, reading playlists costs almost nothing.</li>
+      <li><b>Saving</b>: sync with a code shares everything with another phone. The backup file saves everything to one file you can load later.</li></ul>`,
   },
 };
 function showHelp(key) {
@@ -333,9 +335,35 @@ const ICON = {
 
 /* ---------------- YouTube Data API ---------------- */
 class ApiError extends Error {}
+class LimitError extends ApiError {}     // a daily limit is used up: big jobs pause until tomorrow
+const YT_DAILY_UNITS = 10000;            // Google's free daily allowance for the whole Mixtape project
 const YTData = {
   key() { return (Settings.get().ytKey || '').trim() || CONFIG.YOUTUBE_API_KEY; },
+  // A rough count of YouTube units this phone used today (the real limit is Google's, shared by both phones)
+  day() { return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' }); },
+  units() { const u = Store.get('ytUnits', {}); return u.day === this.day() ? u.n : 0; },
+  spend(n) { Store.set('ytUnits', { day: this.day(), n: this.units() + n }, true); },
+  cost(method, path) { return method !== 'GET' ? 50 : path === 'search' ? 100 : 1; },
+  // Turns a YouTube refusal into a plain sentence
+  fail(r, j, path) {
+    const err = (j && j.error) || {};
+    const reason = (err.errors && err.errors[0] && err.errors[0].reason) || (err.details && err.details[0] && err.details[0].reason) || '';
+    const msg = err.message || ('HTTP ' + r.status);
+    const e = (cls, text) => { const x = new cls(text); x.reason = reason; x.status = r.status; return x; };
+    if (/playlistNotFound/i.test(reason) || (r.status === 404 && path.startsWith('playlist'))) {
+      return e(ApiError, typeof Google !== 'undefined' && Google.on() ? 'Playlist not found. It may have been deleted, or it belongs to someone else and is private.' : 'Playlist not found. In YouTube Music, set its Privacy to Unlisted or Public, then try again.');
+    }
+    if (/quota|dailyLimit/i.test(reason) || /quota/i.test(msg)) return e(LimitError, "Today's free YouTube limit is used up. It resets overnight (midnight Pacific).");
+    if (/youtubeSignupRequired|channelNotFound/i.test(reason)) return e(ApiError, 'This Google account has no YouTube channel yet. On youtube.com tap your picture → Create a channel, then try again.');
+    if (/insufficientPermissions|ACCESS_TOKEN_SCOPE_INSUFFICIENT/i.test(reason + msg)) return e(ApiError, 'Google didn\'t give Mixtape permission to change YouTube playlists. Sign out and sign in again (Settings), ticking every box.');
+    if (/playlistItemsNotAccessible|forbidden/i.test(reason) && path.startsWith('playlist')) return e(ApiError, 'YouTube won\'t let Mixtape change that playlist. Mixtape can only change playlists you made.');
+    if (/REFERRER|referer/i.test(reason + msg)) return e(ApiError, 'YouTube refused the key from this address. The key is locked to calb417.github.io, so open Mixtape from there.');
+    if (/keyInvalid|API key not valid/i.test(reason + msg)) return e(ApiError, 'YouTube says the key is not valid. Check the key at the top of app.js.');
+    return e(ApiError, 'YouTube error: ' + msg);
+  },
   async get(path, params) {
+    // Signed in with Google: playlists are read with the sign-in, so private ones work too
+    if (/^(playlists|playlistItems)$/.test(path) && typeof Google !== 'undefined' && Google.on()) return this.auth('GET', path, params);
     // Through the relay when it holds a YouTube key (and no personal key is set); otherwise straight to Google.
     const viaRelay = typeof Sync !== 'undefined' && Sync.has('youtube') && !(Settings.get().ytKey || '').trim();
     const key = viaRelay ? '' : this.key();
@@ -345,20 +373,30 @@ const YTData = {
     let r;
     try { r = await fetch(url.toString()); }
     catch (e) { throw new ApiError('Could not reach YouTube. Check the internet connection and try again.'); }
+    this.spend(this.cost('GET', path));
     const j = await r.json().catch(() => ({}));
-    if (!r.ok) {
-      const err = (j && j.error) || {};
-      const reason = (err.errors && err.errors[0] && err.errors[0].reason) || (err.details && err.details[0] && err.details[0].reason) || '';
-      const msg = err.message || ('HTTP ' + r.status);
-      if (/playlistNotFound/i.test(reason) || (r.status === 404 && path.startsWith('playlist'))) {
-        throw new ApiError('Playlist not found. In YouTube Music, set its Privacy to Unlisted or Public, then try again.');
-      }
-      if (/quota/i.test(reason) || /quota/i.test(msg)) throw new ApiError("Today's free YouTube limit is used up. It resets overnight (midnight Pacific).");
-      if (/REFERRER|referer/i.test(reason + msg)) throw new ApiError('YouTube refused the key from this address. The key is locked to calb417.github.io, so open Mixtape from there.');
-      if (/keyInvalid|API key not valid/i.test(reason + msg)) throw new ApiError('YouTube says the key is not valid. Check the key at the top of app.js.');
-      throw new ApiError('YouTube error: ' + msg);
-    }
+    if (!r.ok) throw this.fail(r, j, path);
     return j;
+  },
+  // Calls made as the signed-in Google account (needed to make and change playlists)
+  async auth(method, path, params, body) {
+    const url = new URL('https://www.googleapis.com/youtube/v3/' + path);
+    Object.entries(params || {}).forEach(([k, v]) => { if (v != null && v !== '') url.searchParams.set(k, v); });
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const token = await Google.token(attempt > 0);
+      let r;
+      try {
+        r = await fetch(url.toString(), { method, headers: Object.assign({ Authorization: 'Bearer ' + token }, body ? { 'Content-Type': 'application/json' } : {}), body: body ? JSON.stringify(body) : undefined });
+      } catch (e) { throw new ApiError('Could not reach YouTube. Check the internet connection and try again.'); }
+      this.spend(this.cost(method, path));
+      if (r.status === 204) return {};
+      const j = await r.json().catch(() => ({}));
+      if (r.ok) return j;
+      if (r.status === 401 && attempt === 0) continue;                 // the one-hour pass ran out: get a new one
+      if ((r.status === 409 || r.status >= 500) && attempt < 2) { await sleep(1500 * (attempt + 1)); continue; }   // YouTube busy: try again
+      throw this.fail(r, j, path);
+    }
+    throw new ApiError('YouTube kept refusing. Try again in a minute.');
   },
   parsePlaylistId(text) {
     const t = String(text || '').trim();
@@ -552,7 +590,7 @@ Views.home = {
         </button>
         <div class="tiles">
           ${tile('notes', 'Setlist Study Guide', 'Prep for your next show')}
-          ${tile('list', 'Playlist Builder', 'Make, sort and fix playlists')}
+          ${tile('list', 'Playlist Builder', typeof Builder !== 'undefined' ? Builder.tileText() : 'Make playlists', 'builder')}
           ${tile('pin', 'Concerts Near Me', 'Within 40 miles of Melville')}
           ${tile('diary', 'Concert Diary', diaryCount ? `${diaryCount} show${diaryCount === 1 ? '' : 's'} logged` : "Every show you've seen", 'diary')}
         </div>
@@ -579,6 +617,7 @@ Views.home = {
       if (a === 'game') go('#game');
       if (a === 'artists') go('#artists');
       if (a === 'diary') go('#diary');
+      if (a === 'builder') go('#builder');
       if (a === 'soon') toast('Coming in a later update');
     });
     firstVisit('home');
@@ -609,10 +648,16 @@ Views.settings = {
       <div class="list">
         <div class="li"><span>Song pool<div class="sub">${esc(typeof Pool !== 'undefined' ? Pool.label() : '')} · ${pools.length} saved playlist${pools.length === 1 ? '' : 's'}</div></span>
           <button class="btn small" data-a="pools">Change</button></div>
-        <div class="li"><span>Song lookups today<div class="sub">${used} of 100 used · ${remembered} songs remembered</div></span></div>
+        <div class="li"><span>Song memory<div class="sub">${remembered} songs matched to YouTube and remembered</div></span></div>
         <div class="li"><span>Player log<div class="sub">What YouTube reported during the last few songs. Screenshot it for Claude if ads get through.</div></span>
           <button class="btn small" data-a="playerlog">View</button></div>
         <div class="li"><span>Last.fm key<div class="sub">${typeof LastFM !== 'undefined' && LastFM.relay() ? 'In the relay' : typeof LastFM !== 'undefined' && LastFM.ready() ? 'Added' : 'Not added yet (top of app.js)'}</div></span></div>
+      </div>
+
+      <div class="list-h">YouTube Music</div>
+      <div class="list">
+        ${googleRow()}
+        <div class="li"><span>YouTube use today<div class="sub">About ${YTData.units().toLocaleString()} of ${YT_DAILY_UNITS.toLocaleString()} units on this phone · ${used} of 100 song lookups. Resets at midnight Pacific.</div></span></div>
       </div>
 
       <div class="list-h">Saving</div>
@@ -653,6 +698,9 @@ Views.settings = {
         Sync.start().then((code) => { toast('Syncing. Code: ' + code); route(); }).catch((err) => { b.disabled = false; Errors.show('Could not start syncing: ' + (err.message || err)); });
       }
       if (a === 'syncJoin') openSyncJoin();
+      if (a === 'gIn') Google.start(() => route());
+      if (a === 'gOut') { if (confirm('Sign out of Google? Mixtape stops being able to save playlists until you sign in again. This signs out every phone that shares your sync code.')) Google.signOut().then(() => { toast('Signed out'); route(); }); }
+      if (a === 'gCheck') { b.disabled = true; Sync.ping().then(() => route()).catch((err) => { b.disabled = false; Errors.show(err.message || String(err)); }); }
       if (a === 'syncNow') { b.disabled = true; Sync.run(false).then(() => { toast('Synced'); route(); }); }
       if (a === 'syncStop') { if (confirm('Stop syncing on this phone? Everything stays on this phone, and the other phone keeps its copy.')) { Sync.stop(); route(); } }
       if (a === 'import') $('#import-file').click();
@@ -686,6 +734,19 @@ Views.settings = {
   },
 };
 
+function googleRow() {
+  if (typeof Google === 'undefined' || !Sync.url()) return '<div class="li"><span>Google sign-in<div class="sub">Needs the relay.</div></span></div>';
+  if (Google.on()) {
+    return `<div class="li" style="flex-wrap:wrap"><span>Signed in with Google<div class="sub">${esc(Google.email() || 'Your account')}. Playlists save to this account's YouTube Music.</div></span>
+      <button class="btn small" data-a="gOut">Sign out</button></div>`;
+  }
+  if (!Sync.has('google')) {
+    return `<div class="li" style="flex-wrap:wrap"><span>Google sign-in<div class="sub">Not set up in the relay yet. It needs GOOGLE_CLIENT_ID and GOOGLE_CLIENT_SECRET in Cloudflare.</div></span>
+      <button class="btn small" data-a="gCheck">Check again</button></div>`;
+  }
+  return `<div class="li" style="flex-wrap:wrap"><span>Not signed in<div class="sub">Sign in to save playlists to YouTube Music and to use private playlists in the game.</div></span>
+    <button class="btn small primary" data-a="gIn">Sign in with Google</button></div>`;
+}
 function syncRow() {
   if (typeof Sync === 'undefined' || !Sync.url()) {
     return `<div class="li"><span>This phone only<div class="sub">Sync with a code arrives once the relay is set up.</div></span></div>`;
