@@ -14,9 +14,12 @@ const MAX_BODY = 5 * 1024 * 1024;
 export default {
   async fetch(request, env) {
     const origin = request.headers.get('Origin') || '';
-    const allowed = env.ALLOWED_ORIGIN || 'https://calb417.github.io';
+    // forgiving about how the setting was typed: "calb417.github.io/Mixtape/" still means https://calb417.github.io
+    const clean = (o) => { o = String(o || '').trim().toLowerCase(); if (o && !/^https?:\/\//.test(o)) o = 'https://' + o; const m = o.match(/^https?:\/\/[^/]+/); return m ? m[0] : ''; };
+    const allowed = clean(env.ALLOWED_ORIGIN) || 'https://calb417.github.io';
+    const ok = clean(origin) === allowed;
     const cors = {
-      'Access-Control-Allow-Origin': origin === allowed ? origin : allowed,
+      'Access-Control-Allow-Origin': origin || allowed,   // answers are readable so the app can show the real reason
       'Access-Control-Allow-Methods': 'GET, PUT, OPTIONS',
       'Access-Control-Allow-Headers': 'Content-Type',
       'Access-Control-Max-Age': '86400',
@@ -25,7 +28,7 @@ export default {
     const json = (obj, status = 200) => new Response(JSON.stringify(obj), { status, headers: { ...cors, 'Content-Type': 'application/json' } });
     if (request.method === 'OPTIONS') return new Response(null, { status: 204, headers: cors });
     // Only Mixtape's own page may use the relay
-    if (origin !== allowed) return json({ error: 'not allowed' }, 403);
+    if (!ok) return json({ error: 'not allowed' }, 403);
 
     const url = new URL(request.url);
     const parts = url.pathname.split('/').filter(Boolean);

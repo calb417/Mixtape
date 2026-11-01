@@ -18,6 +18,15 @@ const Sync = {
   meta() { if (!this._meta) this._meta = Store.get('syncMeta', {}); return this._meta; },
   saveMeta() { try { localStorage.setItem('mixtape.syncMeta', JSON.stringify(this.meta())); } catch (e) { /* ignore */ } },
   localKeys() { return Store.allKeys().map((k) => k.slice('mixtape.'.length)).filter((k) => this.syncable(k)); },
+  // Every relay call goes through here, so a failure says what actually went wrong
+  async req(path, opts) {
+    let r;
+    try { r = await fetch(this.url() + path, opts); }
+    catch (e) { throw new ApiError(`Can't reach the relay (${this.url().replace(/^https?:\/\//, '')}). In Safari, open that address with /ping on the end and send Claude a screenshot of what shows.`); }
+    if (r.status === 403) throw new ApiError('The relay turned Mixtape away. In Cloudflare, check the ALLOWED_ORIGIN variable is exactly https://calb417.github.io');
+    if (r.status >= 500) { let m = ''; try { m = (await r.clone().json()).error || ''; } catch (e) { /* not json */ } throw new ApiError('The relay hit a problem' + (m ? ': ' + m : ' (' + r.status + ')')); }
+    return r;
+  },
   newCode() { const p = (a) => a[Math.floor(Math.random() * a.length)]; return `${p(WORDS_A)}-${p(WORDS_B)}-${10 + Math.floor(Math.random() * 90)}`; },
 
   // Called by Store.set / Store.del for every change
@@ -34,7 +43,7 @@ const Sync = {
   info() { return Store.get('relayInfo', {}); },
   async ping() {
     if (!this.url()) return null;
-    const r = await fetch(this.url() + '/ping');
+    const r = await this.req('/ping');
     if (!r.ok) throw new Error('relay ' + r.status);
     const j = await r.json();
     Store.set('relayInfo', Object.assign({ at: new Date().toISOString() }, j), true);
@@ -44,7 +53,7 @@ const Sync = {
 
   /* ---------- pull, merge, push ---------- */
   async pull() {
-    const r = await fetch(`${this.url()}/sync/${this.code()}`);
+    const r = await this.req(`/sync/${this.code()}`);
     if (r.status === 404) { this.rev = 0; return false; }
     if (!r.ok) throw new ApiError('Sync: the relay answered ' + r.status);
     const doc = await r.json();
@@ -59,7 +68,7 @@ const Sync = {
       for (let attempt = 0; attempt < 3; attempt++) {
         const meta = this.meta(), items = {};
         this.localKeys().forEach((k) => { items[k] = { v: localStorage.getItem('mixtape.' + k), t: meta[k] || 0 }; });
-        const r = await fetch(`${this.url()}/sync/${this.code()}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseRev: this.rev, items }) });
+        const r = await this.req(`/sync/${this.code()}`, { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ baseRev: this.rev, items }) });
         if (r.status === 409) {                       // the other phone saved first: take its changes, then try again
           const j = await r.json();
           this.rev = (j.current && j.current.rev) || 0;
@@ -142,7 +151,7 @@ const Sync = {
   async start() {
     let code = this.newCode();
     for (let i = 0; i < 5; i++) {                     // make sure nobody uses this code yet
-      const r = await fetch(`${this.url()}/sync/${code}`);
+      const r = await this.req(`/sync/${code}`);
       if (r.status === 404) break;
       code = this.newCode();
     }
@@ -156,7 +165,7 @@ const Sync = {
   async join(code) {
     code = String(code || '').trim().toLowerCase().replace(/\s+/g, '-');
     if (!/^[a-z]+-[a-z]+-\d{2,3}$/.test(code)) throw new ApiError('That code doesn\'t look right. It looks like amber-falcon-42.');
-    const r = await fetch(`${this.url()}/sync/${code}`);
+    const r = await this.req(`/sync/${code}`);
     if (r.status === 404) throw new ApiError('No one is syncing with that code yet. Check it on the other phone (Settings → Saving).');
     if (!r.ok) throw new ApiError('Sync: the relay answered ' + r.status);
     const doc = await r.json();
