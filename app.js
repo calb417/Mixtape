@@ -9,12 +9,12 @@ const CONFIG = {
   LASTFM_API_KEY: '506225735c83135da4286cc87db378b0',
   // The Mixtape relay's address (from Cloudflare), e.g. 'https://mixtape-relay.yourname.workers.dev'.
   // Leave empty until the relay is set up. Once it holds the keys, the two keys above can be emptied.
-  RELAY_URL: '',
+  RELAY_URL: 'https://mixtape-relay.charlie-albano.workers.dev',
 };
 // =====================================================================
 
 // The version lives in index.html (<meta name="mixtape-version">) so the update check can compare it.
-const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.0';
+const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.1';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
