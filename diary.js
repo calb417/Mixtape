@@ -1,6 +1,6 @@
 'use strict';
-/* Concert Diary: every show you've been to. Shows are typed in by hand for now (setlists can be typed
-   or pasted); pulling a setlist from setlist.fm arrives with the relay. Needs app.js and info.js first. */
+/* Concert Diary: every show you've been to. Shows are typed in by hand or pulled from setlist.fm
+   (study.js adds the setlist.fm pieces). Needs app.js and info.js first. */
 
 const Diary = {
   list() { return Store.get('diary', []); },
@@ -50,6 +50,7 @@ Views.diary = {
           <button class="btn" style="flex:0 0 auto" data-d="stats">Stats</button>
         </div>
         <input class="search" data-d="q" placeholder="Search artist, venue, city or year" autocomplete="off" autocapitalize="off" spellcheck="false">
+        <button class="link-btn" data-d="import" style="align-self:flex-start">Import “I was there” from setlist.fm</button>
       </div>
       <div data-d="list"></div>
       <div style="height:30px"></div>
@@ -88,6 +89,7 @@ Views.diary = {
       if (k === 'add') openShowEditor(null, render);
       if (k === 'open') openShow(b.dataset.id, render);
       if (k === 'stats') openDiaryStats();
+      if (k === 'import') openAttendedImport(render);
     });
     firstVisit('diary');
   },
@@ -111,15 +113,21 @@ function openShow(id, onChange) {
       ${e.notes ? `<h3>Notes</h3><p class="about">${esc(e.notes)}</p>` : ''}
       <div class="card-actions">
         <button class="btn small primary" data-s="edit">Edit</button>
+        ${typeof SetlistFM !== 'undefined' && SetlistFM.ready() && e.date ? `<button class="btn small" data-s="pull">${sets.length ? 'Pull again from setlist.fm' : 'Pull setlists from setlist.fm'}</button>` : ''}
         <button class="btn small" data-s="sfm">${ICON.out} Find on setlist.fm</button>
       </div>
-      ${sets.length ? '' : '<p class="muted small">No setlist yet. Tap Edit to type or paste one. Pulling it from setlist.fm arrives with the sync update.</p>'}
+      ${sets.length ? '' : '<p class="muted small">No setlist yet. Pull it from setlist.fm, or tap Edit to type or paste one.</p>'}
     </div>`,
     onMount(body, close) {
       body.addEventListener('click', (ev) => {
         const b = ev.target.closest('[data-s]');
         if (!b) return;
         if (b.dataset.s === 'edit') { close(); setTimeout(() => openShowEditor(id, onChange), 330); }
+        if (b.dataset.s === 'pull') {
+          b.disabled = true; b.textContent = 'Looking…';
+          pullDiarySetlists(id).then((n) => { toast(n ? `Found ${n} setlist${n === 1 ? '' : 's'}` : 'setlist.fm has no setlist for that date yet'); close(); if (onChange) onChange(); if (n) setTimeout(() => openShow(id, onChange), 330); })
+            .catch((err) => { b.disabled = false; Errors.show(err.message || String(err)); });
+        }
         if (b.dataset.s === 'sfm') window.open('https://www.setlist.fm/search?query=' + encodeURIComponent([e.artist, e.venue, e.city].filter(Boolean).join(' ')), '_blank');
       });
     },
@@ -270,5 +278,65 @@ function openDiaryStats() {
       <h3>Most-visited venues</h3>${bars(venues, 10)}
       <h3>Songs heard live most often</h3>${songRows.length ? bars(songRows, 10, 'song') : '<p class="muted small">Shows up once a song is in two or more of your setlists.</p>'}
     </div>`,
+  });
+}
+
+/* ---------------- setlist.fm: pull a show's setlists, import "I was there" ---------------- */
+async function pullDiarySetlists(id) {
+  const e = Diary.get(id);
+  if (!e) return 0;
+  let n = 0;
+  for (const act of Diary.acts(e)) {
+    const r = await SetlistFM.search({ artistName: act, date: SetlistFM.sfm(e.date) }).catch(() => ({ list: [] }));
+    const s = r.list.find((x) => x.songs.length && sim(x.artist, act) >= 0.8) || r.list.find((x) => x.songs.length);
+    if (!s) continue;
+    e.sets = (e.sets || []).filter((x) => norm(x.act) !== norm(act)).concat([{ act, songs: s.songs.map((x) => x.t) }]);
+    if (!e.venue) e.venue = s.venue;
+    if (!e.city) e.city = s.city;
+    n++;
+  }
+  if (n) Diary.put(e);
+  return n;
+}
+function openAttendedImport(onDone) {
+  Sheets.open({
+    title: 'Import “I was there”',
+    html: `<p class="muted small" style="margin-top:0">Shows you marked “I was there” on setlist.fm come in with their setlists. Acts on the same night at the same venue become one show. Shows already in the diary are skipped.</p>
+      <label class="flabel">Your setlist.fm username<input class="field" data-i="user" value="${esc(Store.get('sfmUser', ''))}" autocomplete="off" autocapitalize="off" spellcheck="false"></label>
+      <p class="muted small" data-i="st"></p>
+      <div class="row sheet-actions"><button class="btn primary wide" data-i="go">Import</button></div>`,
+    onMount(body, close) {
+      body.querySelector('[data-i=go]').onclick = async (ev) => {
+        const b = ev.currentTarget, user = body.querySelector('[data-i=user]').value.trim();
+        if (!user) return;
+        Store.set('sfmUser', user, true);
+        const st = (t) => { body.querySelector('[data-i=st]').textContent = t; };
+        b.disabled = true;
+        try {
+          const all = [];
+          for (let p = 1; p <= 25; p++) {
+            const r = await SetlistFM.attended(user, p);
+            if (!r.list.length && p === 1) { st('No “I was there” shows found for that username.'); b.disabled = false; return; }
+            all.push(...r.list);
+            st(`Reading… ${all.length} of ${r.total}`);
+            if (p * r.per >= r.total) break;
+          }
+          const nights = new Map();
+          all.forEach((s) => { const k = s.date + '|' + norm(s.venue); if (!nights.has(k)) nights.set(k, []); nights.get(k).push(s); });
+          let added = 0;
+          nights.forEach((acts) => {
+            acts.sort((x, y) => y.songs.length - x.songs.length);       // the act with the longest set is the headliner
+            const head = acts[0];
+            if (Diary.list().some((d) => d.date === head.date && Diary.acts(d).some((a) => acts.some((x) => sim(a, x.artist) >= 0.8)))) return;
+            Diary.put({ id: Diary.newId(), artist: head.artist, with: acts.slice(1).map((x) => x.artist), date: head.date, venue: head.venue, city: head.city,
+              rating: 0, notes: head.tour ? `Tour: ${head.tour}` : '', sets: acts.filter((x) => x.songs.length).map((x) => ({ act: x.artist, songs: x.songs.map((y) => y.t) })), added: new Date().toISOString() });
+            added++;
+          });
+          toast(`Imported ${added} show${added === 1 ? '' : 's'}`);
+          close();
+          if (onDone) onDone();
+        } catch (err) { b.disabled = false; st(''); Errors.show(err.message || String(err), err instanceof ApiError ? '' : err); }
+      };
+    },
   });
 }

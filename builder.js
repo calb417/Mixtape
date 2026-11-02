@@ -532,6 +532,7 @@ const Job = {
       if (kind === 'remove') await this.runRemove(j);
       if (kind === 'swap') await this.runSwap(j);
       if (kind === 'sort') await this.runSort(j);
+      if (kind === 'match') await this.runMatch(j);
       if (!this.current(j)) return;
       j.state = 'done';
       j.finished = new Date().toISOString();
@@ -620,6 +621,52 @@ const Job = {
       }
       if (!this.step(j)) return;
     }
+  },
+  // Make a saved playlist match a list exactly: find each song, take out what's not wanted, add what's missing, then order it
+  async runMatch(j) {
+    j.vids = j.vids || [];
+    while (j.vids.length < j.songs.length) {
+      if (!this.current(j)) return;
+      const s = j.songs[j.vids.length];
+      let v = j.clean ? '' : s.v;
+      if (!v) v = await SongFinder.find(s.a, s.t, { clean: j.clean });
+      if (!v && j.clean) v = s.v || await SongFinder.find(s.a, s.t);
+      if (!v) j.missing.push(`${s.a} — ${s.t}`);
+      j.vids.push(v || '');
+      j.phase = `Finding songs: ${j.vids.length} of ${j.songs.length}`;
+      if (!this.current(j)) return;
+      this.set(j);
+    }
+    const want = [...new Set(j.vids.filter(Boolean))];
+    const wantSet = new Set(want);
+    let items = await Organize.read(j.playlistId);
+    const seen = new Set();
+    const extra = items.filter((e) => { const keep = !e.gone && wantSet.has(e.v) && !seen.has(e.v); if (keep) seen.add(e.v); return !keep; });
+    for (const e of extra) {
+      if (!this.current(j)) return;
+      j.phase = `Taking out songs no longer in the guide (${extra.indexOf(e) + 1} of ${extra.length})`; this.set(j);
+      await YTData.auth('DELETE', 'playlistItems', { id: e.pid }).catch((err) => { if (err.status !== 404) throw err; });
+      await sleep(120);
+    }
+    const missing = want.filter((v) => !seen.has(v));
+    for (const v of missing) {
+      if (!this.current(j)) return;
+      j.phase = `Adding new songs (${missing.indexOf(v) + 1} of ${missing.length})`; this.set(j);
+      await YTData.auth('POST', 'playlistItems', { part: 'snippet' }, { snippet: { playlistId: j.playlistId, resourceId: { kind: 'youtube#video', videoId: v } } });
+      await sleep(150);
+    }
+    items = await Organize.read(j.playlistId);
+    const rank = new Map(want.map((v, i) => [v, i]));
+    const desired = items.slice().sort((a, b) => (rank.has(a.v) ? rank.get(a.v) : 1e9) - (rank.has(b.v) ? rank.get(b.v) : 1e9));
+    const moves = Organize.moves(items, desired);
+    const byPid = new Map(items.map((e) => [e.pid, e]));
+    for (const m of moves) {
+      if (!this.current(j)) return;
+      j.phase = `Putting songs in show order (${moves.indexOf(m) + 1} of ${moves.length})`; this.set(j);
+      await YTData.auth('PUT', 'playlistItems', { part: 'snippet' }, { id: m.pid, snippet: { playlistId: j.playlistId, resourceId: { kind: 'youtube#video', videoId: byPid.get(m.pid).v }, position: m.position } });
+      await sleep(120);
+    }
+    j.done = true;
   },
   async runSort(j) {
     j.why = 'Reading the playlist…'; this.set(j);
@@ -845,7 +892,7 @@ function accountCard() {
     <span>${ready ? 'You can build playlists now and save them once you sign in.' : 'The relay isn\'t set up for Google sign-in yet, so for now playlists stay in Mixtape.'}</span>
     ${ready ? '<button class="btn small primary" data-j="signin">Sign in with Google</button>' : ''}</div>`;
 }
-function jobVerb(j) { return { save: 'Saving', remove: 'Removing', swap: 'Swapping', sort: 'Sorting' }[j.kind || 'save']; }
+function jobVerb(j) { return { save: 'Saving', remove: 'Removing', swap: 'Swapping', sort: 'Sorting', match: 'Matching' }[j.kind || 'save']; }
 function jobBar(j) {
   const total = Job.total(j);
   const pct = total ? Math.round((j.i / total) * 100) : 0;
@@ -853,6 +900,7 @@ function jobBar(j) {
   const text = kind === 'save' ? `${j.i} of ${total} songs · ${j.added} added${j.already ? ` · ${j.already} already there` : ''}${j.missing.length ? ` · ${j.missing.length} not found` : ''}`
     : kind === 'remove' ? `${j.i} of ${total} removed`
     : kind === 'swap' ? `${j.i} of ${total} checked · ${j.done || 0} swapped${j.missing.length ? ` · ${j.missing.length} with no album version` : ''}`
+    : kind === 'match' ? (j.phase || 'Starting…')
     : j.total == null ? 'Working out the moves…' : `${j.i} of ${total} moves`;
   return `<div data-j="bar"><div class="bar" style="margin:8px 0 6px"><i style="width:${pct}%"></i></div><span class="muted small">${text}</span></div>`;
 }
@@ -864,6 +912,7 @@ function jobCard() {
     if (j.stopped) return '';
     const msg = kind === 'save' ? `${j.added} song${j.added === 1 ? '' : 's'} added${j.already ? `, ${j.already} were already there` : ''}.${j.missing.length ? ` Not found on YouTube: ${esc(j.missing.slice(0, 8).join('; '))}${j.missing.length > 8 ? '…' : ''}` : ''}`
       : kind === 'remove' ? `${j.done || 0} song${j.done === 1 ? '' : 's'} removed.`
+      : kind === 'match' ? `The playlist now matches the study guide.${j.missing.length ? ` Not found on YouTube: ${esc(j.missing.slice(0, 8).join('; '))}` : ''}`
       : kind === 'swap' ? `${j.done || 0} swapped for the album version.${j.missing.length ? ` No album version found: ${esc(j.missing.slice(0, 8).join('; '))}${j.missing.length > 8 ? '…' : ''}` : ''}`
       : `The playlist is in its new order (${j.i} move${j.i === 1 ? '' : 's'}).`;
     return `<div class="note-card"><b>${kind === 'save' ? 'Saved' : 'Done'}: “${esc(j.name)}”</b><span>${msg}</span>

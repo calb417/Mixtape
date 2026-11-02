@@ -14,7 +14,7 @@ const CONFIG = {
 // =====================================================================
 
 // The version lives in index.html (<meta name="mixtape-version">) so the update check can compare it.
-const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.4';
+const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.5';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -276,10 +276,10 @@ const HELP = {
     title: 'Concert Diary',
     html: `<p>A record of every show you've been to.</p>
       <ul><li><b>Add a show</b>: artist and date are all it needs. Add the venue, city, openers, a rating and notes too.</li>
-      <li><b>Setlists</b>: one box per act on the bill. Type or paste one song per line (numbers in front are removed). Pulling setlists straight from setlist.fm arrives with the sync update.</li>
+      <li><b>Setlists</b>: one box per act on the bill. Type or paste one song per line (numbers in front are removed), or open the show and tap <b>Pull setlists from setlist.fm</b>.</li>
       <li>Tap a show to see it; tap the artist, an opener or a song for its info card. <b>Edit</b> changes or deletes it.</li>
       <li><b>Search</b> by artist, venue, city or year. <b>Stats</b> shows shows per year, most-seen artists, most-visited venues and the songs you've heard live most.</li></ul>
-      <p>Saved on this phone and in backups until sync arrives.</p>`,
+      <p><b>Import “I was there”</b> brings in every show you marked on setlist.fm, with setlists.</p>`,
   },
   artists: {
     title: 'My Artists',
@@ -589,7 +589,7 @@ Views.home = {
           <div class="foot"><span class="pool">Pool: ${esc(pool)}</span><span class="pill">${ICON.play}Play</span></div>
         </button>
         <div class="tiles">
-          ${tile('notes', 'Setlist Study Guide', 'Prep for your next show')}
+          ${tile('notes', 'Setlist Study Guide', typeof Study !== 'undefined' ? Study.tileText() : 'Prep for your next show', 'study')}
           ${tile('list', 'Playlist Builder', typeof Builder !== 'undefined' ? Builder.tileText() : 'Make playlists', 'builder')}
           ${tile('pin', 'Concerts Near Me', 'Within 40 miles of Melville')}
           ${tile('diary', 'Concert Diary', diaryCount ? `${diaryCount} show${diaryCount === 1 ? '' : 's'} logged` : "Every show you've seen", 'diary')}
@@ -618,6 +618,7 @@ Views.home = {
       if (a === 'artists') go('#artists');
       if (a === 'diary') go('#diary');
       if (a === 'builder') go('#builder');
+      if (a === 'study') go('#study');
       if (a === 'soon') toast('Coming in a later update');
     });
     firstVisit('home');
@@ -676,6 +677,7 @@ Views.settings = {
           <div class="li"><span>Colors</span><button class="btn small" data-a="resetColors">Reset to black and orange</button></div>
           <div class="li" style="display:block"><div>Your own YouTube key (optional)<div class="sub">Leave empty to use the built-in key. A personal key gets its own daily limit.</div></div>
             <input class="field" style="margin-top:8px" data-s="ytKey" value="${esc(s.ytKey)}" placeholder="Paste a key, or leave empty" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+          <div class="li"><span>Accuracy log<div class="sub">How the study guides did, as a file to share with Claude to tune them</div></span><button class="btn small" data-a="acclog">Export</button></div>
           <div class="li"><span>Error log<div class="sub">${Store.get('errorlog', []).length} saved</div></span><button class="btn small" data-a="errors">View</button></div>
           <div class="li"><span>Version</span><span class="muted mono">${APP_VERSION}</span></div>
         </div>
@@ -693,6 +695,7 @@ Views.settings = {
       if (a === 'help') showHelp('settings');
       if (a === 'pools') Game.openPools(() => route());
       if (a === 'export') Backup.export();
+      if (a === 'acclog' && typeof Study !== 'undefined') Study.exportLog();
       if (a === 'syncStart') {
         b.disabled = true;
         Sync.start().then((code) => { toast('Syncing. Code: ' + code); route(); }).catch((err) => { b.disabled = false; Errors.show('Could not start syncing: ' + (err.message || err)); });

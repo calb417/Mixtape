@@ -480,6 +480,8 @@ const Cards = {
       if (m) { const p = m.parentElement.previousElementSibling; if (p) p.classList.toggle('clamp'); m.textContent = p && p.classList.contains('clamp') ? 'More' : 'Less'; }
       const o = e.target.closest('[data-open]');
       if (o) window.open(o.dataset.open, '_blank');
+      const sl = e.target.closest('[data-setlists]');
+      if (sl && typeof openArtistSetlists !== 'undefined') openArtistSetlists(sl.dataset.setlists, sl.dataset.mbid);
       const mx = e.target.closest('[data-mix]');
       if (mx && typeof Builder !== 'undefined') Builder.fromCard(mx.dataset);
       const y = e.target.closest('[data-ytm]');
@@ -520,14 +522,16 @@ const Cards = {
       <h3>Albums</h3><div data-albums><p class="muted">Loading…</p></div>
       <div data-tags></div>
       <div data-similar></div>
-      <p class="muted small">Setlists and upcoming shows arrive with the Setlist Study Guide and Concerts Near Me updates.</p>
-      <div class="card-actions"><button class="btn small" data-myart="${esc(name)}"></button><button class="btn small" data-mix="artist" data-name="${esc(name)}">+ Playlist</button><button class="btn small" data-ytm="" data-q="${esc(name)}">${ICON.out} YouTube Music</button></div>`;
+      <p class="muted small">Upcoming shows arrive with the Concerts Near Me update.</p>
+      <div class="card-actions"><button class="btn small" data-myart="${esc(name)}"></button><button class="btn small" data-setlists="${esc(name)}" data-mbid="${esc(o.mbid || '')}">Setlists</button><button class="btn small" data-mix="artist" data-name="${esc(name)}">+ Playlist</button><button class="btn small" data-ytm="" data-q="${esc(name)}">${ICON.out} YouTube Music</button></div>`;
     this.myButton(box);
     const lf = await LastFM.artistInfo(name).catch((e) => { if (/key/i.test(e.message)) throw e; return null; });
     const realName = (lf && lf.name) || name;
     this.set(box, '.hero-name', esc(realName));
     const mb0 = box.querySelector('[data-myart]');
     if (mb0) { mb0.dataset.myart = realName; if (lf && lf.mbid) mb0.dataset.mbid = lf.mbid; this.myButton(box); }
+    const slb = box.querySelector('[data-setlists]');
+    if (slb) { slb.dataset.setlists = realName; if (lf && lf.mbid && !slb.dataset.mbid) slb.dataset.mbid = lf.mbid; }
     this.set(box, '[data-ph]', `<i>${this.initials(realName)}</i>`);
     if (lf) {
       const tags = LastFM.arr(lf.tags && lf.tags.tag).slice(0, 6).map((t) => t.name);
@@ -543,6 +547,7 @@ const Cards = {
       if (f) mb = await MB.get('artist/' + f.id, { inc: 'url-rels+artist-rels' }).catch(() => null);
     }
     // Meta line: origin · years · type
+    if (mb && slb && !slb.dataset.mbid) slb.dataset.mbid = mb.id;
     if (mb) {
       const ls = mb['life-span'] || {};
       const yrs = yearOf(ls.begin) ? `${yearOf(ls.begin)}–${ls.ended ? (yearOf(ls.end) || '') : 'present'}` : '';
@@ -689,7 +694,8 @@ const Cards = {
       <div data-about></div><div class="chips" data-tags></div>
       <div class="card-actions"><button class="btn small" data-mix="song" data-artist="${esc(artist)}" data-title="${esc(title)}" data-v="${esc(o.v || '')}">+ Playlist</button><button class="btn small" data-open="https://genius.com/search?q=${encodeURIComponent(artist + ' ' + title)}">Lyrics</button>
         <button class="btn small" data-ytm="${esc(o.v || '')}" data-q="${esc(artist + ' ' + title)}">${ICON.out} YouTube Music</button></div>
-      <p class="muted small">How often it's played on the current tour arrives with the Setlist Study Guide update.</p>`;
+      <p class="muted small" data-tourline></p>`;
+    if (typeof songTourLine !== 'undefined') songTourLine(artist, title).then((t) => this.set(box, '[data-tourline]', esc(t))).catch(() => {});
     const facts = { album: '', rg: '', year: 0, len: 0 };
     const showFacts = () => {
       const rows = [];
