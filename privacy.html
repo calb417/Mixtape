@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Mixtape — Privacy</title>
+<style>
+  body { margin: 0; background: #121014; color: #F4EFE6; font: 16px/1.55 -apple-system, system-ui, sans-serif; }
+  main { max-width: 640px; margin: 0 auto; padding: 32px 22px 60px; }
+  h1 { color: #F28C38; font-size: 28px; margin: 0 0 6px; }
+  h2 { font-size: 18px; margin: 26px 0 6px; }
+  p, li { color: #D8D0C4; }
+  a { color: #F28C38; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Mixtape privacy</h1>
+  <p>Mixtape is a personal music app made by Charlie Albano for his own household and a few friends. It is not a business and shows no ads.</p>
+
+  <h2>What Mixtape keeps</h2>
+  <ul>
+    <li>Your settings, playlists you build, My Artists and the Concert Diary are saved on your phone.</li>
+    <li>If you turn on sync, they are also saved under your sync code on Mixtape's relay (a Cloudflare Worker), so your other phone can read them.</li>
+  </ul>
+
+  <h2>Google sign-in</h2>
+  <ul>
+    <li>Signing in with Google lets Mixtape read your YouTube playlists and make or add to playlists in your YouTube Music. It asks for your email address only to show which account is signed in.</li>
+    <li>Google's sign-in permission is stored on the relay and is used only to make the YouTube requests you ask for. It is never sold, shared or used for anything else.</li>
+    <li>Mixtape's use of information received from Google APIs follows the <a href="https://developers.google.com/terms/api-services-user-data-policy">Google API Services User Data Policy</a>, including the Limited Use requirements.</li>
+    <li>Sign out any time in Mixtape (Settings → YouTube Music → Sign out). That deletes the stored permission and tells Google to cancel it. You can also remove Mixtape at <a href="https://myaccount.google.com/permissions">myaccount.google.com/permissions</a>.</li>
+  </ul>
+
+  <h2>Other services</h2>
+  <p>To look up songs, artists and albums, Mixtape asks YouTube, Last.fm, MusicBrainz, Wikipedia and Apple's iTunes search. Those requests carry the song or artist name, not your account.</p>
+
+  <h2>Questions</h2>
+  <p>Email <a href="mailto:charliealbano@gmail.com">charliealbano@gmail.com</a>.</p>
+  <p style="color:#8E877E; font-size:13px">Last updated November 2, 2026.</p>
+</main>
+</body>
+</html>
