@@ -43,7 +43,7 @@ const Builder = {
   ytmUrl(id) { return 'https://music.youtube.com/playlist?list=' + encodeURIComponent(id); },
   tileText() {
     const j = Job.get();
-    if (j && j.state !== 'done') return j.state === 'running' ? `Saving ${j.i} of ${j.songs.length}…` : `Saving paused at ${j.i} of ${j.songs.length}`;
+    if (j && j.state !== 'done') return j.state === 'running' ? `${jobVerb(j)} ${j.i} of ${Job.total(j) || '…'}…` : `Paused at ${j.i} of ${Job.total(j) || '…'}`;
     const n = this.list().length;
     return n ? `${n} playlist${n === 1 ? '' : 's'} in Mixtape` : 'Make playlists for YouTube Music';
   },
@@ -321,19 +321,199 @@ const Builder = {
   },
 };
 
-/* ---------------- Saving to YouTube Music (one job at a time, carries on across days) ---------------- */
+/* ---------------- Organizing playlists already in YouTube Music ---------------- */
+const SORTS = {
+  artist: 'Artist (ignoring "The"), then albums by year, then track number',
+  title: 'Song title A–Z',
+  album: 'Album A–Z, then track number',
+  year: 'Year (oldest first), then artist',
+  decade: 'Decade, then artist A–Z within each decade',
+  newest: 'Date added (newest first)',
+  oldest: 'Date added (oldest first)',
+};
+const WRONG = [
+  [/\blive\b|\bin concert\b|\bunplugged\b/i, 'live'],
+  [/\bdemo\b/i, 'demo'],
+  [/\bremix\b|\bmix\)|\bextended\b/i, 'remix'],
+  [/\bcover\b|\bkaraoke\b|\btribute\b/i, 'cover'],
+  [/\bacoustic\b/i, 'acoustic'],
+  [/\binstrumental\b/i, 'instrumental'],
+  [/\bsped up\b|\bslowed\b|\breverb\b|\b8d\b|\bnightcore\b/i, 'sped up or slowed'],
+  [/official (music )?video|music video|\bvideo\)|\bmv\b|\bvisuali[sz]er\b/i, 'music video'],
+  [/\blyrics?\b( video)?/i, 'lyric video'],
+];
+const Organize = {
+  cache: null,                       // { id, name, items, at } for the playlist on screen
+  // Every entry in a playlist, with its entry id (needed to move or remove it) and album details
+  async read(id, onProgress) {
+    const out = [];
+    let pageToken = '', guard = 0;
+    do {
+      const j = await YTData.get('playlistItems', { part: 'snippet,contentDetails', playlistId: id, maxResults: 50, pageToken });
+      (j.items || []).forEach((it) => {
+        const sn = it.snippet || {}, v = (it.contentDetails && it.contentDetails.videoId) || (sn.resourceId && sn.resourceId.videoId) || '';
+        const rawT = String(sn.title || ''), chan = String(sn.videoOwnerChannelTitle || '');
+        const c = cleanItem(sn, v);
+        const e = { pid: it.id, v, rawT, chan, topic: / - Topic$/i.test(chan), added: sn.publishedAt || '', gone: !c,
+          a: c ? c.a : '', t: c ? c.t : (rawT || 'Unavailable video'), album: '', year: 0 };
+        if (c) Object.assign(e, this.fromDescription(sn.description || ''));
+        out.push(e);
+      });
+      pageToken = j.nextPageToken || '';
+      if (onProgress) onProgress(out.length, (j.pageInfo && j.pageInfo.totalResults) || 0);
+      guard++;
+    } while (pageToken && guard < 200);
+    return out;
+  },
+  // YouTube's album versions ("Topic") carry the album and year in their description
+  fromDescription(d) {
+    if (!/^Provided to YouTube by/i.test(d)) return {};
+    const blocks = d.split(/\n\s*\n/).map((b) => b.trim());
+    const album = blocks[2] && !/^℗|^Released on|^©/.test(blocks[2]) ? blocks[2] : '';
+    const ys = [d.match(/Released on: (\d{4})/), d.match(/℗ (\d{4})/)].filter(Boolean).map((m) => +m[1]).filter((y) => y > 1900);
+    return { album, year: ys.length ? Math.min(...ys) : 0 };
+  },
+  needsAlbum(key) { return ['artist', 'album', 'year', 'decade'].includes(key); },
+  // Album, year and track number for every song the sort needs them for (remembered on this phone)
+  async enrich(items, key, onProgress) {
+    if (!this.needsAlbum(key)) return;
+    const live = items.filter((e) => !e.gone);
+    let n = 0;
+    for (const e of live) {                                          // album + year for songs that aren't album versions (Apple's search)
+      if (!e.album || !e.year) {
+        const m = await Meta.get({ v: e.v, a: e.a, t: e.t }).catch(() => null);
+        if (m) { e.album = e.album || m.album; e.year = e.year || (+m.year || 0); }
+      }
+      if (onProgress && ++n % 10 === 0) onProgress(`Album details: ${n} of ${live.length}`);
+    }
+    if (key === 'year' || key === 'decade') return;
+    const albums = [...new Set(live.filter((e) => e.album).map((e) => this.albumKey(e)))];
+    let k = 0;
+    for (const ak of albums) {                                       // track numbers, one album at a time (MusicBrainz)
+      const e = live.find((x) => this.albumKey(x) === ak);
+      await this.trackList(e.a, e.album).catch(() => null);
+      if (onProgress) onProgress(`Track numbers: ${++k} of ${albums.length} albums`);
+    }
+    live.forEach((e) => { e.track = this.trackNo(e); });
+  },
+  albumKey(e) { return norm(MyArtists.cleanName(e.a)) + '|' + norm(e.album); },
+  async trackList(a, album) {
+    const cache = Store.get('trackLists', {});
+    const k = norm(MyArtists.cleanName(a)) + '|' + norm(album);
+    if (cache[k]) return cache[k];
+    const clean = String(album).replace(/\s*[\(\[][^\)\]]*(remaster|edition|deluxe|version|expanded|anniversary)[^\)\]]*[\)\]]/ig, '').trim();
+    const j = await MB.get('release-group', { query: `releasegroup:${MB.q(clean)} AND artist:${MB.q(MyArtists.cleanName(a))}`, limit: 5 }, 0);
+    const g = ((j && j['release-groups']) || []).map((x) => ({ x, s: (x.score || 0) / 100 + sim(x.title, clean) })).sort((p, q) => q.s - p.s)[0];
+    let list = [];
+    if (g && g.s > 1.5) { const at = await MB.albumTracks(g.x.id, 0); list = at.tracks.map((t) => norm(cleanTitle(t.t))); }
+    cache[k] = list;
+    const keys = Object.keys(cache);
+    if (keys.length > 3000) keys.slice(0, 500).forEach((x) => delete cache[x]);
+    Store.set('trackLists', cache, true);
+    return list;
+  },
+  trackNo(e) {
+    const list = Store.get('trackLists', {})[this.albumKey(e)] || [];
+    const t = norm(cleanTitle(e.t));
+    let best = 0, at = 0;
+    list.forEach((x, i) => { const s = x === t ? 1 : sim(x, t); if (s > best) { best = s; at = i + 1; } });
+    return best >= 0.8 ? at : 0;
+  },
+  sortKey(e, key) {
+    const a = norm(MyArtists.cleanName(e.a)), t = norm(e.t), al = norm(e.album), y = e.year || 9999, tr = e.track || 999;
+    if (e.gone) return [1, ''];
+    if (key === 'artist') return [0, a, y, al, tr, t];
+    if (key === 'title') return [0, t, a];
+    if (key === 'album') return [0, al || '~', a, tr, t];
+    if (key === 'year') return [0, y, a, al, tr, t];
+    if (key === 'decade') return [0, Math.floor(y / 10), a, y, al, tr, t];
+    if (key === 'newest') return [0, -Date.parse(e.added || 0) || 0];
+    if (key === 'oldest') return [0, Date.parse(e.added || 0) || 0];
+    return [0];
+  },
+  cmp(x, y) {
+    for (let i = 0; i < Math.max(x.length, y.length); i++) {
+      const a = x[i], b = y[i];
+      if (a === b) continue;
+      if (a === undefined) return -1;
+      if (b === undefined) return 1;
+      const c = typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b));
+      if (c) return c;
+    }
+    return 0;
+  },
+  sorted(items, key) {
+    return items.map((e, i) => ({ e, i, k: this.sortKey(e, key) })).sort((p, q) => this.cmp(p.k, q.k) || p.i - q.i).map((x) => x.e);
+  },
+  // The fewest moves that turn the current order into the new one: songs already in the right order
+  // relative to each other stay put (longest increasing run), the rest are slotted in after their new neighbor.
+  moves(current, desired) {
+    const ids = desired.map((e) => e.pid);
+    const rank = new Map(ids.map((p, i) => [p, i]));
+    const seq = current.map((e) => rank.get(e.pid));
+    const tails = [], tailIdx = [], prev = new Array(seq.length).fill(-1);
+    seq.forEach((r, i) => {
+      let lo = 0, hi = tails.length;
+      while (lo < hi) { const m = (lo + hi) >> 1; if (tails[m] < r) lo = m + 1; else hi = m; }
+      tails[lo] = r; tailIdx[lo] = i;
+      prev[i] = lo > 0 ? tailIdx[lo - 1] : -1;
+    });
+    const keep = new Set();
+    for (let i = tailIdx[tails.length - 1]; i !== undefined && i >= 0; i = prev[i]) keep.add(current[i].pid);
+    const arr = current.map((e) => e.pid), out = [];
+    ids.forEach((pid, k) => {
+      if (keep.has(pid)) return;
+      arr.splice(arr.indexOf(pid), 1);
+      const pos = k === 0 ? 0 : arr.indexOf(ids[k - 1]) + 1;
+      arr.splice(pos, 0, pid);
+      out.push({ pid, position: pos });
+    });
+    return out;
+  },
+  // Where a new song belongs in a sorted playlist
+  slot(items, e, key) {
+    const k = this.sortKey(e, key);
+    let pos = items.length;
+    for (let i = 0; i < items.length; i++) if (this.cmp(this.sortKey(items[i], key), k) > 0) { pos = i; break; }
+    return pos;
+  },
+  flags(e) {
+    if (e.gone) return [];
+    // Only the extras count: "(Live)", "- Live at the Fillmore", "[Official Video]" — not a song called "Live Forever"
+    const segs = e.rawT.split(/\s[-–—|]\s/);
+    const rest = segs.length > 1 && sim(segs[0], e.a) > 0.6 ? segs.slice(2) : segs.slice(1);
+    const extra = (e.rawT.match(/[\(\[][^\)\]]*[\)\]]/g) || []).join(' ') + ' ' + rest.join(' ');
+    const out = [];
+    WRONG.forEach(([re, why]) => { if (re.test(extra)) out.push(why); });
+    if (!e.topic && e.chan && !/vevo$/i.test(e.chan) && sim(MyArtists.cleanName(e.chan), MyArtists.cleanName(e.a)) < 0.6) out.push('uploaded by ' + e.chan);
+    return [...new Set(out)];
+  },
+  duplicates(items) {
+    const groups = new Map();
+    items.forEach((e) => { if (e.gone) return; const k = songKey(MyArtists.cleanName(e.a), cleanTitle(e.t)); if (!groups.has(k)) groups.set(k, []); groups.get(k).push(e); });
+    return [...groups.values()].filter((g) => g.length > 1).map((g) => { const keep = g.find((e) => e.topic) || g[0]; return { keep, extra: g.filter((e) => e !== keep) }; });
+  },
+  sortedPlaylists() { return Store.get('sortedPlaylists', {}); },
+  keepSorted(id, key) { const s = this.sortedPlaylists(); if (key) s[id] = key; else delete s[id]; Store.set('sortedPlaylists', s); },
+};
+
+/* ---------------- Jobs that change YouTube Music (one at a time, carry on across days) ---------------- */
 const Job = {
   busy: false,
   get() { return Store.get('saveJob', null); },
   set(j) { Store.set('saveJob', j, true); document.dispatchEvent(new Event('mixjob')); },
   current(j) { const c = this.get(); return c && c.started === j.started && c.state === 'running'; },
-  start(mix) {
+  total(j) { return j.total != null ? j.total : (j.songs || j.pids || j.swaps || []).length; },
+  begin(spec) {
     const cur = this.get();
-    if (cur && cur.state !== 'done' && !confirm(`"${cur.name}" hasn't finished saving. Stop it and save this one instead?`)) return false;
-    this.set({ mixId: mix.id, name: mix.name, playlistId: mix.target ? mix.target.id : '', privacy: mix.privacy || 'private', clean: !!mix.clean,
-      songs: mix.songs.map((s) => ({ a: s.a, t: s.t, v: s.v || '' })), i: 0, added: 0, already: 0, missing: [], state: 'running', started: new Date().toISOString(), why: '' });
+    if (cur && cur.state !== 'done' && !confirm(`"${cur.name}" hasn't finished in YouTube Music. Stop it and do this instead?`)) return false;
+    this.set(Object.assign({ i: 0, state: 'running', started: new Date().toISOString(), why: '' }, spec));
     this.run(true);
     return true;
+  },
+  start(mix) {
+    return this.begin({ kind: 'save', mixId: mix.id, name: mix.name, playlistId: mix.target ? mix.target.id : '', privacy: mix.privacy || 'private', clean: !!mix.clean,
+      songs: mix.songs.map((s) => ({ a: s.a, t: s.t, v: s.v || '' })), added: 0, already: 0, missing: [] });
   },
   stop() { const j = this.get(); if (j) { j.state = 'done'; j.stopped = true; this.set(j); } },
   clear() { try { localStorage.removeItem('mixtape.saveJob'); } catch (e) { /* ignore */ } document.dispatchEvent(new Event('mixjob')); },
@@ -347,50 +527,116 @@ const Job = {
     j.state = 'running'; j.why = ''; j.limitDay = '';
     this.set(j);
     try {
-      if (!j.playlistId) {
-        const r = await YTData.auth('POST', 'playlists', { part: 'snippet,status' }, { snippet: { title: j.name.slice(0, 150), description: 'Made with Mixtape' }, status: { privacyStatus: j.privacy } });
-        j.playlistId = r.id;
-        j.made = true;
-        this.set(j);
-        Builder.markSaved(j.mixId, r.id, j.name, true);
-      }
-      // What's in the playlist already, so nothing goes in twice (also after an interrupted save)
-      const have = new Set((await YTData.playlistItems(j.playlistId)).map((it) => it.v));
-      while (j.i < j.songs.length) {
-        if (!this.current(j)) return;                 // stopped, or replaced by another save
-        const s = j.songs[j.i];
-        let v = j.clean ? '' : s.v;
-        if (!v) v = await SongFinder.find(s.a, s.t, { clean: j.clean });
-        if (!v && j.clean) v = s.v || await SongFinder.find(s.a, s.t);   // no clean version found: the regular one
-        if (!v) j.missing.push(`${s.a} — ${s.t}`);
-        else if (have.has(v)) j.already++;
-        else {
-          try {
-            await YTData.auth('POST', 'playlistItems', { part: 'snippet' }, { snippet: { playlistId: j.playlistId, resourceId: { kind: 'youtube#video', videoId: v } } });
-            have.add(v);
-            j.added++;
-          } catch (e) {
-            if (/videoNotFound|videoNotAvailable/i.test(e.reason || '')) j.missing.push(`${s.a} — ${s.t}`);
-            else throw e;
-          }
-          await sleep(150);
-        }
-        j.i++;
-        if (!this.current(j)) return;
-        this.set(j);
-      }
+      const kind = j.kind || 'save';
+      if (kind === 'save') await this.runSave(j);
+      if (kind === 'remove') await this.runRemove(j);
+      if (kind === 'swap') await this.runSwap(j);
+      if (kind === 'sort') await this.runSort(j);
+      if (!this.current(j)) return;
       j.state = 'done';
       j.finished = new Date().toISOString();
       this.set(j);
-      Builder.markSaved(j.mixId, j.playlistId, j.name);
-      toast(`Saved "${j.name}" to YouTube Music`);
+      if (kind === 'save') Builder.markSaved(j.mixId, j.playlistId, j.name);
+      if (Organize.cache && Organize.cache.id === j.playlistId) Organize.cache.stale = true;
+      toast(kind === 'save' ? `Saved "${j.name}" to YouTube Music` : `Done: "${j.name}"`);
     } catch (e) {
       if (!this.current(j)) return;
       j.state = 'paused';
-      if (e instanceof LimitError) { j.limitDay = YTData.day(); j.why = e.message + ' Saving carries on by itself after that, whenever Mixtape is open.'; }
-      else { j.why = e.message || String(e); Errors.show('Saving the playlist stopped: ' + j.why, e instanceof ApiError ? '' : e); }
+      if (e instanceof LimitError) { j.limitDay = YTData.day(); j.why = e.message + ' It carries on by itself after that, whenever Mixtape is open.'; }
+      else { j.why = e.message || String(e); Errors.show('YouTube Music work stopped: ' + j.why, e instanceof ApiError ? '' : e); }
       this.set(j);
     } finally { this.busy = false; }
+  },
+  // step(): saves progress and says whether to keep going
+  step(j) { j.i++; if (!this.current(j)) return false; this.set(j); return true; },
+
+  async runSave(j) {
+    if (!j.playlistId) {
+      const r = await YTData.auth('POST', 'playlists', { part: 'snippet,status' }, { snippet: { title: j.name.slice(0, 150), description: 'Made with Mixtape' }, status: { privacyStatus: j.privacy } });
+      j.playlistId = r.id;
+      j.made = true;
+      this.set(j);
+      Builder.markSaved(j.mixId, r.id, j.name, true);
+    }
+    // What's in the playlist already, so nothing goes in twice (also after an interrupted save)
+    const sortKey = Organize.sortedPlaylists()[j.playlistId] || '';
+    const items = await Organize.read(j.playlistId);
+    if (sortKey) await Organize.enrich(items, sortKey);
+    const have = new Set(items.map((it) => it.v));
+    while (j.i < j.songs.length) {
+      if (!this.current(j)) return;
+      const s = j.songs[j.i];
+      let v = j.clean ? '' : s.v;
+      if (!v) v = await SongFinder.find(s.a, s.t, { clean: j.clean });
+      if (!v && j.clean) v = s.v || await SongFinder.find(s.a, s.t);   // no clean version found: the regular one
+      if (!v) j.missing.push(`${s.a} — ${s.t}`);
+      else if (have.has(v)) j.already++;
+      else {
+        // A playlist set to stay sorted gets the song in its spot, not at the bottom
+        const e = { pid: '', v, a: s.a, t: s.t, album: '', year: 0, added: new Date().toISOString() };
+        let position;
+        if (sortKey) { await Organize.enrich([e], sortKey); position = Organize.slot(items, e, sortKey); }
+        try {
+          const r = await YTData.auth('POST', 'playlistItems', { part: 'snippet' }, { snippet: Object.assign({ playlistId: j.playlistId, resourceId: { kind: 'youtube#video', videoId: v } }, position != null ? { position } : {}) });
+          e.pid = r.id || '';
+          if (position != null) items.splice(position, 0, e); else items.push(e);
+          have.add(v);
+          j.added++;
+        } catch (err) {
+          if (/videoNotFound|videoNotAvailable/i.test(err.reason || '')) j.missing.push(`${s.a} — ${s.t}`);
+          else throw err;
+        }
+        await sleep(150);
+      }
+      if (!this.step(j)) return;
+    }
+  },
+  async runRemove(j) {
+    while (j.i < j.pids.length) {
+      if (!this.current(j)) return;
+      try { await YTData.auth('DELETE', 'playlistItems', { id: j.pids[j.i] }); j.done = (j.done || 0) + 1; }
+      catch (e) { if (e.status !== 404) throw e; }                   // already gone
+      await sleep(120);
+      if (!this.step(j)) return;
+    }
+  },
+  async runSwap(j) {
+    const items = await Organize.read(j.playlistId);
+    while (j.i < j.swaps.length) {
+      if (!this.current(j)) return;
+      const s = j.swaps[j.i];
+      const at = items.findIndex((e) => e.pid === s.pid);
+      if (at >= 0) {
+        const v = await SongFinder.find(s.a, s.t, { album: true });
+        if (!v || v === s.v) j.missing.push(`${s.a} — ${s.t}`);
+        else {
+          const r = await YTData.auth('POST', 'playlistItems', { part: 'snippet' }, { snippet: { playlistId: j.playlistId, resourceId: { kind: 'youtube#video', videoId: v }, position: at } });
+          items.splice(at, 0, { pid: r.id, v });
+          await YTData.auth('DELETE', 'playlistItems', { id: s.pid }).catch((e) => { if (e.status !== 404) throw e; });
+          items.splice(at + 1, 1);
+          j.done = (j.done || 0) + 1;
+        }
+        await sleep(120);
+      }
+      if (!this.step(j)) return;
+    }
+  },
+  async runSort(j) {
+    j.why = 'Reading the playlist…'; this.set(j);
+    const items = await Organize.read(j.playlistId);
+    await Organize.enrich(items, j.key, (msg) => { j.why = msg + '…'; if (this.current(j)) this.set(j); });
+    const moves = Organize.moves(items, Organize.sorted(items, j.key));
+    j.total = j.i + moves.length;
+    j.why = '';
+    this.set(j);
+    const byPid = new Map(items.map((e) => [e.pid, e]));
+    for (const m of moves) {
+      if (!this.current(j)) return;
+      const e = byPid.get(m.pid);
+      await YTData.auth('PUT', 'playlistItems', { part: 'snippet' }, { id: m.pid, snippet: { playlistId: j.playlistId, resourceId: { kind: 'youtube#video', videoId: e.v }, position: m.position } });
+      await sleep(120);
+      if (!this.step(j)) return;
+    }
   },
 };
 // Carry on with an unfinished save when Mixtape opens or comes back on screen
@@ -436,6 +682,7 @@ Views.builder = {
           <button class="btn small primary" style="flex:1" data-h="new">+ New playlist</button>
           ${Google.on() ? '<button class="btn small" style="flex:1" data-h="mine">Add to one of yours</button>' : ''}
         </div>
+        ${Google.on() ? '<div class="pad row" style="margin-top:10px"><button class="btn small wide" data-h="org">Organize one of your playlists</button></div>' : ''}
         <div class="list-h">In Mixtape</div>
         ${list.length ? '<div class="my-list">' + list.map((m) => `<button class="diary-row" data-h="open" data-id="${esc(m.id)}"><span class="main"><span class="n">${esc(m.name)}</span>
             <span class="c">${m.songs.length} song${m.songs.length === 1 ? '' : 's'} · ${m.saved ? 'saved ' + esc(new Date(m.saved.at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })) : m.target ? 'adds to your playlist' : 'not saved yet'}</span></span>${ICON.chev}</button>`).join('') + '</div>'
@@ -450,6 +697,7 @@ Views.builder = {
       if (h === 'new') { const m = Builder.create(''); go('#builder?mix=' + m.id); }
       if (h === 'mine') Google.pickPlaylist('Add songs to which playlist?', (p) => { const m = Builder.forPlaylist(p); go('#builder?mix=' + m.id); });
       if (h === 'open') go('#builder?mix=' + b.dataset.id);
+      if (h === 'org') Google.pickPlaylist('Organize which playlist?', (p) => go(organizeHash(p.id, p.name)));
     });
   },
 
@@ -495,7 +743,8 @@ Views.builder = {
         ${n ? `<p class="muted small pad" style="margin-top:10px">${est.lookups ? `${est.lookups} song${est.lookups === 1 ? '' : 's'} still need${est.lookups === 1 ? 's' : ''} a YouTube lookup. ` : ''}${est.days > 1 ? `With YouTube's free daily limit this takes about <b>${est.days} days</b>; it stops each day and carries on by itself the next time Mixtape is open.` : 'Fits in one day of YouTube\'s free limit.'} Keep Mixtape open while it saves.</p>` : ''}
         <div class="pad" style="display:flex; flex-direction:column; gap:10px; margin-top:12px">
           <button class="btn primary wide" data-e="save" ${n && !mine ? '' : 'disabled'}>${mix.target ? `Add new songs to “${esc(mix.target.name)}”` : 'Save to YouTube Music'}</button>
-          ${mix.saved ? `<div class="row"><button class="btn small" style="flex:1" data-e="open">${ICON.out} Open in YouTube Music</button><button class="btn small" style="flex:1" data-e="game">${ICON.play} Use in the game</button></div>` : ''}
+          ${mix.saved ? `<div class="row"><button class="btn small" style="flex:1" data-e="open">${ICON.out} Open in YouTube Music</button><button class="btn small" style="flex:1" data-e="game">${ICON.play} Use in the game</button></div>
+            <button class="btn small" data-e="org">Organize it in YouTube Music</button>` : ''}
           <button class="link-btn" data-e="delete" style="align-self:center">Delete this list from Mixtape</button>
         </div>`;
     };
@@ -534,6 +783,7 @@ Views.builder = {
         }
         if (k === 'open') window.open(Builder.ytmUrl(mix.saved.id), '_blank');
         if (k === 'game') await Builder.useInGame(mix);
+        if (k === 'org') go(organizeHash(mix.saved.id, mix.target ? mix.target.name : mix.name));
         if (k === 'delete') {
           if (confirm(`Delete "${mix.name}" from Mixtape?${mix.saved ? ' The playlist stays in YouTube Music.' : ''}`)) { Builder.remove(mix.id); go('#builder'); }
         }
@@ -595,20 +845,31 @@ function accountCard() {
     <span>${ready ? 'You can build playlists now and save them once you sign in.' : 'The relay isn\'t set up for Google sign-in yet, so for now playlists stay in Mixtape.'}</span>
     ${ready ? '<button class="btn small primary" data-j="signin">Sign in with Google</button>' : ''}</div>`;
 }
+function jobVerb(j) { return { save: 'Saving', remove: 'Removing', swap: 'Swapping', sort: 'Sorting' }[j.kind || 'save']; }
 function jobBar(j) {
-  const pct = j.songs.length ? Math.round((j.i / j.songs.length) * 100) : 0;
-  return `<div data-j="bar"><div class="bar" style="margin:8px 0 6px"><i style="width:${pct}%"></i></div>
-    <span class="muted small">${j.i} of ${j.songs.length} songs · ${j.added} added${j.already ? ` · ${j.already} already there` : ''}${j.missing.length ? ` · ${j.missing.length} not found` : ''}</span></div>`;
+  const total = Job.total(j);
+  const pct = total ? Math.round((j.i / total) * 100) : 0;
+  const kind = j.kind || 'save';
+  const text = kind === 'save' ? `${j.i} of ${total} songs · ${j.added} added${j.already ? ` · ${j.already} already there` : ''}${j.missing.length ? ` · ${j.missing.length} not found` : ''}`
+    : kind === 'remove' ? `${j.i} of ${total} removed`
+    : kind === 'swap' ? `${j.i} of ${total} checked · ${j.done || 0} swapped${j.missing.length ? ` · ${j.missing.length} with no album version` : ''}`
+    : j.total == null ? 'Working out the moves…' : `${j.i} of ${total} moves`;
+  return `<div data-j="bar"><div class="bar" style="margin:8px 0 6px"><i style="width:${pct}%"></i></div><span class="muted small">${text}</span></div>`;
 }
 function jobCard() {
   const j = Job.get();
   if (!j) return '';
+  const kind = j.kind || 'save';
   if (j.state === 'done') {
     if (j.stopped) return '';
-    return `<div class="note-card"><b>Saved “${esc(j.name)}”</b><span>${j.added} song${j.added === 1 ? '' : 's'} added${j.already ? `, ${j.already} were already there` : ''}.${j.missing.length ? ` Not found on YouTube: ${esc(j.missing.slice(0, 8).join('; '))}${j.missing.length > 8 ? '…' : ''}` : ''}</span>
+    const msg = kind === 'save' ? `${j.added} song${j.added === 1 ? '' : 's'} added${j.already ? `, ${j.already} were already there` : ''}.${j.missing.length ? ` Not found on YouTube: ${esc(j.missing.slice(0, 8).join('; '))}${j.missing.length > 8 ? '…' : ''}` : ''}`
+      : kind === 'remove' ? `${j.done || 0} song${j.done === 1 ? '' : 's'} removed.`
+      : kind === 'swap' ? `${j.done || 0} swapped for the album version.${j.missing.length ? ` No album version found: ${esc(j.missing.slice(0, 8).join('; '))}${j.missing.length > 8 ? '…' : ''}` : ''}`
+      : `The playlist is in its new order (${j.i} move${j.i === 1 ? '' : 's'}).`;
+    return `<div class="note-card"><b>${kind === 'save' ? 'Saved' : 'Done'}: “${esc(j.name)}”</b><span>${msg}</span>
       <span class="row"><button class="btn small" data-j="openj">${ICON.out} Open in YouTube Music</button><button class="btn small ghost" data-j="dismiss">OK</button></span></div>`;
   }
-  return `<div class="note-card"><b>${j.state === 'running' ? 'Saving' : 'Paused'}: “${esc(j.name)}”</b>${jobBar(j)}
+  return `<div class="note-card"><b>${j.state === 'running' ? jobVerb(j) : 'Paused'}: “${esc(j.name)}”</b>${jobBar(j)}
     ${j.why ? `<span>${esc(j.why)}</span>` : '<span>Keep Mixtape open. If you leave, it picks up where it stopped.</span>'}
     <span class="row">${j.state === 'running' ? '' : '<button class="btn small primary" data-j="go">Carry on now</button>'}<button class="btn small" data-j="stop">Stop</button></span></div>`;
 }
@@ -616,14 +877,14 @@ function jobClick(k, b) {
   const j = Job.get();
   if (k === 'signin') Google.start(() => { route(); Job.run(true); });
   if (k === 'go') Job.run(true);
-  if (k === 'stop' && confirm('Stop saving? Songs already added stay in the playlist.')) Job.stop();
+  if (k === 'stop' && confirm('Stop? What\'s already done in YouTube Music stays done.')) Job.stop();
   if (k === 'dismiss') Job.clear();
   if (k === 'openj' && j && j.playlistId) window.open(Builder.ytmUrl(j.playlistId), '_blank');
 }
 // The note cards' buttons use data-j; send them to jobClick
 document.addEventListener('click', (e) => {
   const b = e.target.closest('[data-j]');
-  if (b && b.tagName === 'BUTTON' && currentView === Views.builder) jobClick(b.dataset.j, b);
+  if (b && b.tagName === 'BUTTON' && (currentView === Views.builder || currentView === Views.organize)) jobClick(b.dataset.j, b);
 });
 
 HELP.builder = {
@@ -637,4 +898,223 @@ HELP.builder = {
     <li><b>Prefer clean versions</b> looks for clean or radio-edit versions. YouTube doesn't label them reliably, so check a song or two.</li></ul>
     <h3>YouTube's daily limit</h3>
     <p>YouTube gives Mixtape a free allowance each day (it resets at midnight Pacific). Adding a song costs 50 units of 10,000; a song Mixtape hasn't seen before also needs a lookup (100 units, and 100 lookups a day at most). Songs from your playlists are already known, so they're cheaper. A big playlist saves a bit each day: keep Mixtape open while it works, and it carries on by itself the next day.</p>`,
+};
+
+/* ---------------- Organize one of your YouTube Music playlists ---------------- */
+function organizeHash(id, name) { return '#organize?pl=' + encodeURIComponent(id) + '&n=' + encodeURIComponent(name || ''); }
+const baseTitle = (t) => String(t || '').replace(/\s*[\(\[][^\)\]]*[\)\]]/g, '').replace(/\s[-–—]\s.*$/, '').trim() || t;
+
+Views.organize = {
+  tab: 'sort',
+  param(k) { const m = (location.hash || '').match(new RegExp('[?&]' + k + '=([^&]*)')); return m ? decodeURIComponent(m[1]) : ''; },
+  html() {
+    return `<div class="screen">
+      <header class="topbar">
+        <button class="icon-btn" data-o="back" aria-label="Back">${ICON.back}</button>
+        <div class="title"><h1>Organize</h1></div>
+        <button class="icon-btn" data-o="help" aria-label="Help">?</button>
+      </header>
+      <div data-o="job"></div>
+      <div data-o="head" class="pad" style="margin-top:6px"></div>
+      <div data-o="tabs" class="pad chips" style="margin-top:12px"></div>
+      <div data-o="body"></div>
+      <div style="height:30px"></div>
+    </div>`;
+  },
+  mount(root) {
+    const el = root.firstElementChild;
+    const $o = (k) => el.querySelector(`[data-o=${k}]`);
+    const id = this.param('pl');
+    let name = this.param('n') || 'Playlist';
+    if (!id) { go('#builder'); return; }
+    this.el = el;
+    this.sel = new Set();
+    this.q = ''; this.artist = ''; this.album = ''; this.goneOnly = false;
+    this.preview = null;
+    const items = () => (Organize.cache && Organize.cache.id === id ? Organize.cache.items : []);
+    const drawJob = () => { const j = Job.get(); $o('job').innerHTML = j && j.playlistId === id ? jobCard() : ''; };
+    this.drawJob = drawJob;
+    const head = () => {
+      const all = items(), gone = all.filter((e) => e.gone).length;
+      $o('head').innerHTML = `<div style="font-family: var(--display); font-weight: 700; font-size: 22px">${esc(name)}</div>
+        <div class="row" style="align-items:center; justify-content:space-between; gap:10px; margin-top:4px">
+          <span class="muted small" data-o="count">${all.length ? `${all.length} songs${gone ? ` · ${gone} unavailable` : ''}` : 'Reading…'}</span>
+          <span class="row" style="gap:14px"><button class="link-btn" data-o="refresh">Refresh</button><button class="link-btn" data-o="ytm">Open ↗</button></span></div>
+        ${Organize.sortedPlaylists()[id] ? `<p class="muted small" style="margin:4px 0 0">Kept sorted: ${esc(SORTS[Organize.sortedPlaylists()[id]].toLowerCase())}.</p>` : ''}`;
+    };
+    const tabs = () => {
+      const t = [['sort', 'Sort'], ['find', 'Find & remove'], ['wrong', 'Wrong versions'], ['dupes', 'Duplicates']];
+      $o('tabs').innerHTML = t.map(([k, l]) => `<button class="chip ${this.tab === k ? 'on' : ''}" data-o="tab" data-t="${k}">${l}</button>`).join('');
+    };
+    const row = (e, opts = {}) => `<div class="check ${this.sel.has(e.pid) ? 'on' : ''} ${opts.keep ? 'have' : ''}">
+        ${opts.keep ? `<span class="box-btn"><span class="box" style="border-style:dashed"></span></span>` : `<button class="box-btn" data-o="tick" data-p="${esc(e.pid)}" aria-label="Select ${esc(e.t)}"><span class="box">${ICON.check}</span></button>`}
+        <button class="main tapcard" ${e.gone ? 'disabled' : Cards.attrs('song', { artist: e.a, title: e.t, v: e.v })}><span class="n">${esc(e.t)}</span>
+        <span class="c">${esc([e.a, e.album, e.year || ''].filter(Boolean).join(' · '))}${opts.why ? ' · <b style="color:var(--accent)">' + esc(opts.why) + '</b>' : ''}${opts.keep ? ' · keeps this one' : ''}</span></button></div>`;
+    const action = (label, k, n, note) => `<div class="org-actions">${note ? `<p class="muted small" style="margin:0 0 8px">${note}</p>` : ''}<button class="btn primary wide" data-o="${k}" ${n ? '' : 'disabled'}>${label}</button></div>`;
+    const units = (n, per) => { const u = n * per, d = Math.ceil(u / (YT_DAILY_UNITS * 0.95)); return `About ${u.toLocaleString()} YouTube units${d > 1 ? ` — about <b>${d} days</b> of the free daily limit; it carries on by itself each day` : ', which fits in today\'s limit'}.`; };
+
+    const body = () => {
+      const all = items();
+      const b = $o('body');
+      if (!all.length) { b.innerHTML = '<p class="muted pad" data-o="status">Reading the playlist…</p>'; return; }
+      if (this.tab === 'sort') {
+        const key = this.sortKey || Organize.sortedPlaylists()[id] || 'artist';
+        this.sortKey = key;
+        const p = this.preview && this.preview.key === key ? this.preview : null;
+        b.innerHTML = `<div class="list-h">Sort by</div>
+          <div class="list">${Object.entries(SORTS).map(([k, l]) => `<button class="li" data-o="key" data-k="${k}"><span>${l}</span><span class="box-btn"><span class="radio ${k === key ? 'on' : ''}"></span></span></button>`).join('')}</div>
+          <div class="list" style="margin-top:12px"><label class="li"><span>Keep it sorted<div class="sub">Songs Mixtape adds later go straight into their spot, not to the bottom.</div></span>
+            <span class="switch"><input type="checkbox" data-o="keep" ${Organize.sortedPlaylists()[id] === key ? 'checked' : ''}><span></span></span></label></div>
+          <p class="muted small pad" data-o="status" style="margin-top:10px">${Organize.needsAlbum(key) ? 'Albums, years and track numbers come from YouTube, Apple and MusicBrainz. The first time can take a few minutes for a big playlist; after that they\'re remembered.' : ''}</p>
+          ${p ? `<p class="pad" style="margin:6px 0 0">${p.moves.length ? `<b>${p.moves.length}</b> of ${all.length} songs move.` : 'Already in this order.'}</p>
+              <div class="my-list" style="margin-top:8px">${p.order.slice(0, 60).map((e, i) => `<div class="mx-row"><span class="grip" style="cursor:default">${i + 1}</span><span class="mx-main"><span class="tx"><span class="n">${esc(e.t)}</span><span class="c">${esc([e.a, e.album, e.year || ''].filter(Boolean).join(' · '))}</span></span></span></div>`).join('')}</div>
+              ${p.order.length > 60 ? `<p class="muted small pad">…and ${p.order.length - 60} more.</p>` : ''}
+              ${action('Save this order to YouTube Music', 'dosort', p.moves.length, p.moves.length ? units(p.moves.length, 50) + ' Only the songs that need to move are moved.' : '')}`
+            : action('Show the new order', 'preview', 1, '')}`;
+        return;
+      }
+      if (this.tab === 'find') {
+        const artists = new Map();
+        all.forEach((e) => { if (e.gone) return; const a = MyArtists.cleanName(e.a); artists.set(norm(a), { name: a, n: ((artists.get(norm(a)) || {}).n || 0) + 1 }); });
+        const albums = this.artist ? [...new Set(all.filter((e) => norm(MyArtists.cleanName(e.a)) === this.artist && e.album).map((e) => e.album))] : [];
+        const gone = all.filter((e) => e.gone).length;
+        b.innerHTML = `<div class="pad" style="display:flex; flex-direction:column; gap:8px">
+            <input class="search" data-o="q" value="${esc(this.q)}" placeholder="Find a song in this playlist" autocomplete="off" autocapitalize="off" spellcheck="false">
+            <div class="row" style="gap:8px"><select class="field" data-o="artist" style="flex:1"><option value="">All artists</option>${[...artists.entries()].sort((x, y) => x[0].localeCompare(y[0])).map(([k, a]) => `<option value="${esc(k)}" ${k === this.artist ? 'selected' : ''}>${esc(a.name)} (${a.n})</option>`).join('')}</select>
+              ${albums.length ? `<select class="field" data-o="album" style="flex:1"><option value="">All albums</option>${albums.sort().map((x) => `<option ${x === this.album ? 'selected' : ''}>${esc(x)}</option>`).join('')}</select>` : ''}</div>
+            ${gone ? `<button class="chip ${this.goneOnly ? 'on' : ''}" data-o="gone" style="align-self:flex-start">Unavailable videos (${gone})</button>` : ''}
+            <div class="row" style="gap:16px"><button class="link-btn" data-o="all">Select all shown</button><button class="link-btn" data-o="none">Select none</button></div></div>
+          <div data-o="flist"></div>`;
+        fillFind();
+        return;
+      }
+      if (this.tab === 'wrong') {
+        const list = all.map((e) => ({ e, why: Organize.flags(e) })).filter((x) => x.why.length);
+        b.innerHTML = `<p class="muted small pad" style="margin-top:4px">Live, demo, remix, cover and music-video versions, and uploads by someone other than the artist. <b>Swap</b> puts the album version in the same spot and takes this one out. Some may be on purpose; tick only the ones to swap.</p>
+          ${list.length ? `<div class="pad row" style="gap:16px"><button class="link-btn" data-o="all">Select all</button><button class="link-btn" data-o="none">Select none</button></div>
+            <div class="batch-list pad">${list.slice(0, 400).map((x) => row(x.e, { why: x.why.join(', ') })).join('')}</div>` : '<p class="pad">Nothing looks wrong. Every song is a regular album version.</p>'}
+          ${list.length ? action(`Swap ${this.sel.size} for album versions`, 'swap', this.sel.size, this.sel.size ? `Each swap needs a song lookup (${DAILY_LOOKUPS} a day) and two playlist changes. ` + units(this.sel.size, 200) : '') : ''}`;
+        this.shown = list.map((x) => x.e);
+        return;
+      }
+      if (this.tab === 'dupes') {
+        const groups = Organize.duplicates(all);
+        if (this.dupesFresh !== groups.length) { this.dupesFresh = groups.length; this.sel = new Set(groups.flatMap((g) => g.extra.map((e) => e.pid))); }
+        const n = groups.reduce((s, g) => s + g.extra.length, 0);
+        b.innerHTML = groups.length ? `<p class="muted small pad" style="margin-top:4px">${groups.length} song${groups.length === 1 ? ' is' : 's are'} in here more than once. The album version (or the first copy) stays; the extra copies are ticked.</p>
+            <div class="batch-list pad">${groups.slice(0, 200).map((g) => `<div style="border-bottom:1px solid var(--surface2); padding-bottom:4px">${row(g.keep, { keep: true })}${g.extra.map((e) => row(e, { why: e.v === g.keep.v ? 'same video' : (e.topic ? 'album version' : 'another version') })).join('')}</div>`).join('')}</div>
+            ${action(`Remove ${this.sel.size} extra cop${this.sel.size === 1 ? 'y' : 'ies'}`, 'remove', this.sel.size, this.sel.size ? units(this.sel.size, 50) : '')}`
+          : '<p class="pad">No duplicates. Every song is in here once.</p>';
+        this.shown = groups.flatMap((g) => g.extra);
+        return;
+      }
+    };
+    // The Find list redraws on its own, so typing in the search box isn't interrupted
+    const fillFind = () => {
+      const box = el.querySelector('[data-o=flist]');
+      if (!box) return;
+      const list = items().filter((e) => (this.goneOnly ? e.gone : true)
+        && (!this.artist || norm(MyArtists.cleanName(e.a)) === this.artist) && (!this.album || e.album === this.album)
+        && (!this.q || fuzzyScore(this.q, e.t + ' ' + e.a + ' ' + e.album) > 0));
+      this.shown = list;
+      box.innerHTML = `<div class="batch-list pad">${list.slice(0, 400).map((e) => row(e)).join('') || '<p class="muted">No matches.</p>'}${list.length > 400 ? `<p class="muted small">Showing 400 of ${list.length}. Search or pick an artist to narrow it.</p>` : ''}</div>
+        ${action(`Remove ${this.sel.size} from the playlist`, 'remove', this.sel.size, this.sel.size ? units(this.sel.size, 50) : '')}`;
+    };
+    const refresh = () => (this.tab === 'find' ? fillFind() : body());
+    const draw = () => { drawJob(); head(); tabs(); body(); };
+    this.draw = draw;
+
+    const load = async (force) => {
+      if (!force && Organize.cache && Organize.cache.id === id && !Organize.cache.stale) { draw(); return; }
+      Organize.cache = { id, name, items: [] };
+      this.preview = null; this.sel = new Set(); this.dupesFresh = null;
+      draw();
+      try {
+        const list = await Organize.read(id, (n, total) => { const s = el.querySelector('[data-o=status]'); if (s) s.textContent = `Reading the playlist… ${n}${total ? ' of ' + total : ''} songs`; });
+        if (name === 'Playlist') name = await YTData.playlistName(id).catch(() => name);
+        Organize.cache = { id, name, items: list, at: Date.now() };
+        if (currentView === Views.organize && this.el === el) draw();
+      } catch (e) { const s = el.querySelector('[data-o=status]'); if (s) s.textContent = e.message || String(e); Errors.show(e.message || String(e), e instanceof ApiError ? '' : e); }
+    };
+    this.load = load;
+
+    el.addEventListener('input', (e) => {
+      if (e.target.dataset.o !== 'q') return;
+      this.q = e.target.value;
+      clearTimeout(this.qTimer);
+      this.qTimer = setTimeout(fillFind, 250);
+    });
+    el.addEventListener('change', (e) => {
+      const k = e.target.dataset.o;
+      if (k === 'artist') { this.artist = e.target.value; this.album = ''; body(); }
+      if (k === 'album') { this.album = e.target.value; body(); }
+      if (k === 'keep') { Organize.keepSorted(id, e.target.checked ? this.sortKey : ''); head(); toast(e.target.checked ? 'Kept sorted from now on' : 'No longer kept sorted'); }
+    });
+    el.addEventListener('click', async (e) => {
+      const b = e.target.closest('[data-o]');
+      if (!b || b.tagName === 'INPUT' || b.tagName === 'SELECT') return;
+      const k = b.dataset.o;
+      try {
+        if (k === 'back') go('#builder');
+        if (k === 'help') showHelp('organize');
+        if (k === 'refresh') load(true);
+        if (k === 'ytm') window.open(Builder.ytmUrl(id), '_blank');
+        if (k === 'tab') { this.tab = b.dataset.t; this.sel = new Set(); this.dupesFresh = null; tabs(); body(); }
+        if (k === 'tick') { const p = b.dataset.p; if (this.sel.has(p)) this.sel.delete(p); else this.sel.add(p); refresh(); }
+        if (k === 'all') { (this.shown || []).forEach((x) => this.sel.add(x.pid)); refresh(); }
+        if (k === 'none') { this.sel = new Set(); refresh(); }
+        if (k === 'gone') { this.goneOnly = !this.goneOnly; body(); }
+        if (k === 'key') {
+          this.sortKey = b.dataset.k; this.preview = null;
+          if (Organize.sortedPlaylists()[id] && Organize.sortedPlaylists()[id] !== this.sortKey) Organize.keepSorted(id, '');
+          body(); head();
+        }
+        if (k === 'preview') {
+          b.disabled = true;
+          const st = el.querySelector('[data-o=status]');
+          const all = items(), key = this.sortKey;
+          await Organize.enrich(all, key, (msg) => { if (st) st.textContent = msg + '…'; });
+          const order = Organize.sorted(all, key);
+          this.preview = { key, order, moves: Organize.moves(all, order) };
+          body();
+        }
+        if (k === 'dosort') {
+          const p = this.preview;
+          if (Job.begin({ kind: 'sort', key: p.key, name, playlistId: id, total: null })) { drawJob(); window.scrollTo(0, 0); }
+        }
+        if (k === 'remove') {
+          const pids = items().filter((x) => this.sel.has(x.pid)).map((x) => x.pid);
+          if (!pids.length || !confirm(`Remove ${pids.length} song${pids.length === 1 ? '' : 's'} from "${name}" in YouTube Music?`)) return;
+          if (Job.begin({ kind: 'remove', name, playlistId: id, pids })) { this.sel = new Set(); drawJob(); window.scrollTo(0, 0); }
+        }
+        if (k === 'swap') {
+          const swaps = items().filter((x) => this.sel.has(x.pid)).map((x) => ({ pid: x.pid, v: x.v, a: MyArtists.cleanName(x.a), t: baseTitle(x.t) }));
+          if (!swaps.length) return;
+          if (Job.begin({ kind: 'swap', name, playlistId: id, swaps, missing: [] })) { this.sel = new Set(); drawJob(); window.scrollTo(0, 0); }
+        }
+      } catch (err) { b.disabled = false; Errors.show(err.message || String(err), err instanceof ApiError ? '' : err); }
+    });
+    load(false);
+    firstVisit('organize');
+    if (Job.get() && !Job.busy) Job.run(false);
+  },
+};
+// While a job runs on this playlist, move its bar; when it finishes, read the playlist again
+document.addEventListener('mixjob', () => {
+  if (currentView !== Views.organize || !Views.organize.drawJob) return;
+  const j = Job.get();
+  const live = Views.organize.el && Views.organize.el.querySelector('[data-o=job] [data-j=bar]');
+  if (j && j.state === 'running' && live) { live.outerHTML = jobBar(j); return; }
+  Views.organize.drawJob();
+  if (j && j.state === 'done' && Organize.cache && Organize.cache.stale && Organize.cache.id === j.playlistId && Views.organize.load) Views.organize.load(true);
+});
+
+HELP.organize = {
+  title: 'Organize a playlist',
+  html: `<p>Tidy up one of your YouTube Music playlists. Changes go straight into YouTube Music.</p>
+    <ul><li><b>Sort</b>: pick an order and tap <b>Show the new order</b> to see it first. <b>Save this order</b> moves only the songs that need to move. <b>Keep it sorted</b> puts songs Mixtape adds later straight into their spot.</li>
+    <li><b>Find &amp; remove</b>: search the playlist (close matches), or pick an artist and album to jump to them. Tick songs and tap <b>Remove</b>. <b>Unavailable videos</b> lists deleted or private ones.</li>
+    <li><b>Wrong versions</b>: live, demo, remix, cover and music-video versions, and uploads by someone other than the artist. <b>Swap</b> puts the album version in the same spot.</li>
+    <li><b>Duplicates</b>: songs that are in more than once. The extra copies are ticked for removal.</li></ul>
+    <p>Each move, removal or addition costs 50 of YouTube's 10,000 free daily units, so sorting a big playlist runs over several days. Keep Mixtape open while it works; it carries on by itself the next time it's open.</p>`,
 };

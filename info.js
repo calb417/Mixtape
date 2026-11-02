@@ -394,12 +394,13 @@ const SongFinder = {
     if (clean) return m[k + '|clean'] !== undefined;
     return m[k] !== undefined || this.poolIndex().has(k);
   },
-  // opts.clean: look for the clean or radio-edit version (remembered separately)
+  // opts.clean: look for the clean or radio-edit version; opts.album: insist on the album version
+  // (each remembered separately)
   async find(a, t, opts = {}) {
-    const m = this.load(), k = songKey(a, t) + (opts.clean ? '|clean' : '');
+    const m = this.load(), k = songKey(a, t) + (opts.clean ? '|clean' : opts.album ? '|album' : '');
     this.looked = false;
     if (m[k] !== undefined) return m[k] || null;
-    if (!opts.clean) {
+    if (!opts.clean && !opts.album) {
       const fromPool = this.poolIndex().get(k);
       if (fromPool) return fromPool;
     }
@@ -421,6 +422,7 @@ const SongFinder = {
       if (/ - Topic$/i.test(sn.channelTitle || '')) s += 0.2;
       if (bad.test(raw) && !bad.test(t)) s -= 0.4;
       if (opts.clean && cleanRe.test(raw)) s += 0.35;
+      if (opts.album && !/ - Topic$/i.test(sn.channelTitle || '')) s -= 0.5;
       if (opts.clean && /explicit/i.test(raw)) s -= 0.3;
       if (s > bestScore) { bestScore = s; best = c.v; }
     });

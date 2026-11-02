@@ -3,7 +3,7 @@
    is filled in. Two phones that use the same code share My Artists, the Concert Diary, playlists, the
    game's pool and song memory, settings, Playlist Builder lists and the Google sign-in. Needs app.js loaded first. */
 
-const SYNC_KEYS = ['settings', 'myArtists', 'diary', 'pools', 'filters', 'blocked', 'songs', 'recent', 'mixes', 'google'];
+const SYNC_KEYS = ['settings', 'myArtists', 'diary', 'pools', 'filters', 'blocked', 'songs', 'recent', 'mixes', 'google', 'sortedPlaylists'];
 const WORDS_A = ['amber', 'blue', 'brave', 'calm', 'cosmic', 'crimson', 'electric', 'golden', 'happy', 'indigo', 'jolly', 'lucky', 'mellow', 'neon', 'quiet', 'rapid', 'silver', 'sunny', 'velvet', 'wild'];
 const WORDS_B = ['falcon', 'guitar', 'tiger', 'comet', 'harbor', 'piano', 'river', 'rocket', 'meadow', 'tempo', 'vinyl', 'echo', 'drum', 'lantern', 'canyon', 'otter', 'maple', 'anchor', 'tuba', 'zebra'];
 
