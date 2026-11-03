@@ -349,7 +349,15 @@ const Organize = {
     const out = [];
     let pageToken = '', guard = 0;
     do {
-      const j = await YTData.get('playlistItems', { part: 'snippet,contentDetails', playlistId: id, maxResults: 50, pageToken });
+      let j;
+      try { j = await YTData.get('playlistItems', { part: 'snippet,contentDetails', playlistId: id, maxResults: 50, pageToken }); }
+      catch (e) {
+        // YouTube answers "not found" for a brand-new or empty playlist of yours; check it really exists before giving up
+        if (e.status !== 404 || pageToken || !Google.on()) throw e;
+        const p = await YTData.auth('GET', 'playlists', { part: 'id', id }).catch(() => ({}));
+        if ((p.items || []).length) return out;
+        throw e;
+      }
       (j.items || []).forEach((it) => {
         const sn = it.snippet || {}, v = (it.contentDetails && it.contentDetails.videoId) || (sn.resourceId && sn.resourceId.videoId) || '';
         const rawT = String(sn.title || ''), chan = String(sn.videoOwnerChannelTitle || '');
@@ -578,7 +586,7 @@ const Job = {
         let position;
         if (sortKey) { await Organize.enrich([e], sortKey); position = Organize.slot(items, e, sortKey); }
         try {
-          const r = await YTData.auth('POST', 'playlistItems', { part: 'snippet' }, { snippet: Object.assign({ playlistId: j.playlistId, resourceId: { kind: 'youtube#video', videoId: v } }, position != null ? { position } : {}) });
+          const r = await this.insert(j.playlistId, v, position);
           e.pid = r.id || '';
           if (position != null) items.splice(position, 0, e); else items.push(e);
           have.add(v);
@@ -590,6 +598,17 @@ const Job = {
         await sleep(150);
       }
       if (!this.step(j)) return;
+    }
+  },
+  // Adding a song; a playlist made moments ago can say "not found" for a few seconds, so wait and try again
+  async insert(playlistId, v, position) {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await YTData.auth('POST', 'playlistItems', { part: 'snippet' }, { snippet: Object.assign({ playlistId, resourceId: { kind: 'youtube#video', videoId: v } }, position != null ? { position } : {}) });
+      } catch (e) {
+        if (attempt >= 5 || !/playlistNotFound/i.test(e.reason || '')) throw e;
+        await sleep(3000);
+      }
     }
   },
   async runRemove(j) {
@@ -652,7 +671,7 @@ const Job = {
     for (const v of missing) {
       if (!this.current(j)) return;
       j.phase = `Adding new songs (${missing.indexOf(v) + 1} of ${missing.length})`; this.set(j);
-      await YTData.auth('POST', 'playlistItems', { part: 'snippet' }, { snippet: { playlistId: j.playlistId, resourceId: { kind: 'youtube#video', videoId: v } } });
+      await this.insert(j.playlistId, v);
       await sleep(150);
     }
     items = await Organize.read(j.playlistId);
