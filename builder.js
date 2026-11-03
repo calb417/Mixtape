@@ -575,9 +575,7 @@ const Job = {
     while (j.i < j.songs.length) {
       if (!this.current(j)) return;
       const s = j.songs[j.i];
-      let v = j.clean ? '' : s.v;
-      if (!v) v = await SongFinder.find(s.a, s.t, { clean: j.clean });
-      if (!v && j.clean) v = s.v || await SongFinder.find(s.a, s.t);   // no clean version found: the regular one
+      const v = await this.video(j, s);
       if (!v) j.missing.push(`${s.a} — ${s.t}`);
       else if (have.has(v)) j.already++;
       else {
@@ -599,6 +597,19 @@ const Job = {
       }
       if (!this.step(j)) return;
     }
+  },
+  // Which video to add for a song. With "Prefer clean versions": songs Apple says aren't explicit keep their
+  // regular version; explicit (or unknown) ones get a labeled clean version if YouTube has one, otherwise the
+  // regular version, and they're listed at the end so you can swap them by hand.
+  async video(j, s) {
+    if (!j.clean) return s.v || await SongFinder.find(s.a, s.t);
+    const ex = await Explicit.check(s.a, s.t);
+    if (ex === 'n') return s.v || await SongFinder.find(s.a, s.t);
+    const c = await SongFinder.findClean(s.a, s.t);
+    if (c) return c;
+    const v = s.v || await SongFinder.find(s.a, s.t);
+    if (v && ex === 'e') { j.unclean = j.unclean || []; if (!j.unclean.includes(`${s.t} — ${s.a}`)) j.unclean.push(`${s.t} — ${s.a}`); }
+    return v;
   },
   // Adding a song; a playlist made moments ago can say "not found" for a few seconds, so wait and try again
   async insert(playlistId, v, position) {
@@ -647,9 +658,7 @@ const Job = {
     while (j.vids.length < j.songs.length) {
       if (!this.current(j)) return;
       const s = j.songs[j.vids.length];
-      let v = j.clean ? '' : s.v;
-      if (!v) v = await SongFinder.find(s.a, s.t, { clean: j.clean });
-      if (!v && j.clean) v = s.v || await SongFinder.find(s.a, s.t);
+      const v = await this.video(j, s);
       if (!v) j.missing.push(`${s.a} — ${s.t}`);
       j.vids.push(v || '');
       j.phase = `Finding songs: ${j.vids.length} of ${j.songs.length}`;
@@ -781,7 +790,7 @@ Views.builder = {
       const shown = showAll ? mix.songs : mix.songs.slice(0, 300);
       const j = Job.get();
       const mine = j && j.mixId === mix.id && j.state !== 'done';
-      body.innerHTML = `${accountCard()}${mine ? jobCard() : ''}
+      body.innerHTML = `${accountCard()}${j && j.mixId === mix.id ? jobCard() : ''}
         <div class="pad" style="margin-top:12px">
           <input class="field mx-name" data-e="name" value="${esc(mix.name)}" placeholder="Playlist name" autocomplete="off" spellcheck="false" aria-label="Playlist name">
           ${mix.target ? `<p class="muted small" style="margin:6px 2px 0">${mix.saved && mix.saved.id === mix.target.id && mix.saved.made ? 'Saved as' : 'Adds to your playlist'} <b>${esc(mix.target.name)}</b> in YouTube Music. Songs already in it are skipped.</p>` : ''}
@@ -795,14 +804,14 @@ Views.builder = {
           <span class="row" style="gap:14px">${n > 1 ? '<button class="link-btn" data-e="sort">Sort</button>' : ''}${n ? '<button class="link-btn" data-e="clear">Clear</button>' : ''}</span></div>
         ${n ? `<div class="my-list mx-list" data-e="list">${shown.map((s, i) => `<div class="mx-row" data-i="${i}">
               <span class="grip" aria-label="Drag to move">≡</span>
-              <button class="mx-main" ${Cards.attrs('song', { artist: s.a, title: s.t, v: s.v })}><span class="num">${i + 1}</span><span class="tx"><span class="n">${esc(s.t)}</span><span class="c">${esc(s.a)}</span></span></button>
+              <button class="mx-main" ${Cards.attrs('song', { artist: s.a, title: s.t, v: s.v })}><span class="num">${i + 1}</span><span class="tx"><span class="n">${esc(s.t)}${mix.clean ? explicitTag(s) : ''}</span><span class="c">${esc(s.a)}</span></span></button>
               <button class="icon-btn sm" data-e="del" data-i="${i}" aria-label="Remove ${esc(s.t)}">${ICON.close}</button></div>`).join('')}</div>
             ${shown.length < n ? `<div class="pad"><button class="link-btn" data-e="all">Show all ${n} songs</button></div>` : ''}`
           : '<p class="muted pad">No songs yet. Add some with the buttons above, or tap <b>+ Playlist</b> on any info card.</p>'}
 
         <div class="list-h">Saving</div>
         <div class="list">
-          <label class="li"><span>Prefer clean versions<div class="sub">Looks for clean or radio-edit versions where YouTube has them.</div></span>
+          <label class="li"><span>Prefer clean versions<div class="sub">Songs marked <b>E</b> are explicit (from Apple's music data). Mixtape looks for a clean or radio-edit version of those; <b>E!</b> means YouTube has no labeled clean version, so the regular one goes in.</div></span>
             <span class="switch"><input type="checkbox" data-e="clean" ${mix.clean ? 'checked' : ''}><span></span></span></label>
           ${mix.target ? '' : `<div class="li"><span>Who can see it</span><span class="seg" role="group">${['private', 'unlisted', 'public'].map((p) => `<button class="${mix.privacy === p ? 'on' : ''}" data-e="priv" data-v="${p}">${p[0].toUpperCase() + p.slice(1)}</button>`).join('')}</span></div>`}
         </div>
@@ -816,6 +825,22 @@ Views.builder = {
     };
     draw();
     this.redraw = draw;
+    // With "Prefer clean versions" on, check which songs are explicit (Apple, a few a minute) and tag them
+    const checkExplicit = async () => {
+      const mix = mixNow();
+      if (!mix || !mix.clean || this.checking) return;
+      this.checking = true;
+      try {
+        for (const s of mix.songs) {
+          if (currentView !== Views.builder || this.mixId() !== id || !(mixNow() || {}).clean) break;
+          if (Explicit.known(s.a, s.t) !== undefined) continue;
+          await Explicit.check(s.a, s.t);
+          if (!document.querySelector('.mx-row.dragging')) { const y = window.scrollY; draw(); window.scrollTo(0, y); }
+        }
+      } finally { this.checking = false; }
+    };
+    this.checkExplicit = checkExplicit;
+    checkExplicit();
 
     // name: saved as you type
     let nameTimer = null;
@@ -826,7 +851,7 @@ Views.builder = {
       nameTimer = setTimeout(() => { const m = mixNow(); if (m) { m.name = v.trim() || 'New playlist'; Builder.put(m); } }, 400);
     });
     body.addEventListener('change', (e) => {
-      if (e.target.dataset.e === 'clean') { const m = mixNow(); m.clean = e.target.checked; Builder.put(m); draw(); }
+      if (e.target.dataset.e === 'clean') { const m = mixNow(); m.clean = e.target.checked; Builder.put(m); draw(); if (m.clean) checkExplicit(); }
     });
     body.addEventListener('click', async (e) => {
       const b = e.target.closest('[data-e]');
@@ -904,6 +929,13 @@ Views.builder = {
   window.scrollTo(0, y);
 }));
 
+// E = explicit (Apple), E! = explicit and YouTube has no labeled clean version
+function explicitTag(s) {
+  const ex = Explicit.known(s.a, s.t);
+  if (ex !== 'e') return '';
+  const none = SongFinder.load()[songKey(s.a, s.t) + '|clean2'] === '';
+  return `<span class="etag${none ? ' none' : ''}" title="${none ? 'Explicit; no clean version found' : 'Explicit'}">${none ? 'E!' : 'E'}</span>`;
+}
 function accountCard() {
   if (Google.on()) return '';
   const ready = Sync.has('google');
@@ -929,9 +961,10 @@ function jobCard() {
   const kind = j.kind || 'save';
   if (j.state === 'done') {
     if (j.stopped) return '';
-    const msg = kind === 'save' ? `${j.added} song${j.added === 1 ? '' : 's'} added${j.already ? `, ${j.already} were already there` : ''}.${j.missing.length ? ` Not found on YouTube: ${esc(j.missing.slice(0, 8).join('; '))}${j.missing.length > 8 ? '…' : ''}` : ''}`
+    const unclean = (j.unclean || []).length ? `<br><b style="color:var(--text)">Explicit, and YouTube has no labeled clean version of:</b> ${esc(j.unclean.join('; '))}. The regular version went in; swap these by hand in YouTube Music if you need to.` : '';
+    const msg = kind === 'save' ? `${j.added} song${j.added === 1 ? '' : 's'} added${j.already ? `, ${j.already} were already there` : ''}.${j.missing.length ? ` Not found on YouTube: ${esc(j.missing.slice(0, 8).join('; '))}${j.missing.length > 8 ? '…' : ''}` : ''}${unclean}`
       : kind === 'remove' ? `${j.done || 0} song${j.done === 1 ? '' : 's'} removed.`
-      : kind === 'match' ? `The playlist now matches the study guide.${j.missing.length ? ` Not found on YouTube: ${esc(j.missing.slice(0, 8).join('; '))}` : ''}`
+      : kind === 'match' ? `The playlist now matches the study guide.${j.missing.length ? ` Not found on YouTube: ${esc(j.missing.slice(0, 8).join('; '))}` : ''}${unclean}`
       : kind === 'swap' ? `${j.done || 0} swapped for the album version.${j.missing.length ? ` No album version found: ${esc(j.missing.slice(0, 8).join('; '))}${j.missing.length > 8 ? '…' : ''}` : ''}`
       : `The playlist is in its new order (${j.i} move${j.i === 1 ? '' : 's'}).`;
     return `<div class="note-card"><b>${kind === 'save' ? 'Saved' : 'Done'}: “${esc(j.name)}”</b><span>${msg}</span>
@@ -963,7 +996,7 @@ HELP.builder = {
     <li>Drag <b>≡</b> to move a song, <b>×</b> to remove it, <b>Sort</b> to sort or shuffle. Tap a song for its card.</li>
     <li><b>Save to YouTube Music</b> makes the playlist (Private unless you pick Unlisted or Public). After that the button adds any new songs to it.</li>
     <li><b>Add to one of yours</b> adds songs to a playlist you already have; songs already in it are skipped.</li>
-    <li><b>Prefer clean versions</b> looks for clean or radio-edit versions. YouTube doesn't label them reliably, so check a song or two.</li></ul>
+    <li><b>Prefer clean versions</b>: Apple's music data says which songs are explicit (marked <b>E</b>). Songs that aren't explicit keep their regular version. For explicit ones Mixtape tries three searches for a version YouTube labels Clean or Radio Edit. Many clean versions on YouTube Music aren't labeled at all, so when none turns up the regular version goes in, the song is marked <b>E!</b>, and the save lists it so you can swap it by hand.</li></ul>
     <h3>YouTube's daily limit</h3>
     <p>YouTube gives Mixtape a free allowance each day (it resets at midnight Pacific). Adding a song costs 50 units of 10,000; a song Mixtape hasn't seen before also needs a lookup (100 units, and 100 lookups a day at most). Songs from your playlists are already known, so they're cheaper. A big playlist saves a bit each day: keep Mixtape open while it works, and it carries on by itself the next day.</p>`,
 };

@@ -371,6 +371,38 @@ const Year = {
   },
 };
 
+/* ================= Is a song explicit? (Apple's free search marks every song) ================= */
+const Explicit = {
+  last: 0, chain: Promise.resolve(),
+  mem() { if (!this._m) this._m = Store.get('explicit', {}); return this._m; },
+  // 'e' = explicit, 'n' = not explicit, undefined = not checked yet, '?' = Apple doesn't know the song
+  known(a, t) { return this.mem()[songKey(a, t)]; },
+  async check(a, t) {
+    const k = songKey(a, t), m = this.mem();
+    if (m[k] !== undefined) return m[k];
+    // Apple allows about 20 searches a minute, so they go one at a time
+    const p = (this.chain = this.chain.catch(() => {}).then(async () => {
+      if (m[k] !== undefined) return m[k];
+      const wait = this.last + 3100 - Date.now();
+      if (wait > 0) await sleep(wait);
+      this.last = Date.now();
+      let res = '?';
+      try {
+        const data = await jsonp('https://itunes.apple.com/search?' + new URLSearchParams({ term: `${a} ${t}`.slice(0, 120), entity: 'song', media: 'music', limit: '15' }));
+        const hits = (data.results || []).filter((r) => sim(cleanTitle(r.trackName), t) >= 0.85 && sim(r.artistName, a) >= 0.6);
+        if (hits.some((r) => r.trackExplicitness === 'explicit')) res = 'e';
+        else if (hits.length) res = 'n';
+      } catch (e) { return '?'; }                 // couldn't ask: don't remember, try again next time
+      m[k] = res;
+      const keys = Object.keys(m);
+      if (keys.length > 6000) keys.slice(0, 1000).forEach((x) => delete m[x]);
+      Store.set('explicit', m, true);
+      return res;
+    }));
+    return p;
+  },
+};
+
 /* ================= Song finder: artist + title → YouTube video, remembered ================= */
 const DAILY_LOOKUPS = 100;
 const SongFinder = {
@@ -388,10 +420,40 @@ const SongFinder = {
   },
   forget() { this.idx = null; },
   remember(a, t, v) { const m = this.load(); m[songKey(a, t)] = v; Store.set('songs', m, true); },
+  // A clean version YouTube has labeled as one ("Clean", "Radio Edit", "Edited"). Tries up to three
+  // searches; remembers the answer, including "none found" (''). Returns the video or null.
+  async findClean(a, t) {
+    const m = this.load(), k = songKey(a, t) + '|clean2';
+    if (m[k] !== undefined) return m[k] || null;
+    const cleanRe = /\b(clean|radio edit|radio version|edited|censored)\b/i;
+    for (const extra of ['clean', 'radio edit', 'clean version']) {
+      if (this.used() >= DAILY_LOOKUPS) throw new LimitError(`Today's ${DAILY_LOOKUPS} song lookups are used up. The count resets overnight (midnight Pacific).`);
+      this.count();
+      const j = await YTData.get('search', { part: 'snippet', type: 'video', videoEmbeddable: 'true', maxResults: 15, q: `${a} ${t} ${extra}` });
+      let best = null, bestScore = 0;
+      (j.items || []).forEach((it, i) => {
+        const sn = it.snippet || {};
+        const raw = decodeEntities(sn.title);
+        if (!cleanRe.test(raw) || /explicit|dirty/i.test(raw)) return;
+        const c = cleanItem({ title: raw, videoOwnerChannelTitle: sn.channelTitle }, it.id && it.id.videoId);
+        if (!c) return;
+        const bare = raw.replace(/\s*[\(\[][^\)\]]*(clean|radio|edit|censored)[^\)\]]*[\)\]]/ig, '').replace(/\s[-–]\s*(clean|radio edit|edited).*$/i, '');
+        const ts = Math.max(sim(t, c.t), sim(t, bare)), as = Math.max(sim(a, c.a), sim(a, sn.channelTitle));
+        if (ts < 0.7 || as < 0.45) return;
+        if (/\b(live|cover|karaoke|remix|instrumental|sped up|slowed|lyrics?)\b/i.test(raw) && !/\b(live|remix)\b/i.test(t)) return;
+        const s = ts * 0.6 + as * 0.4 - i * 0.01 + (/ - Topic$/i.test(sn.channelTitle || '') ? 0.2 : 0);
+        if (s > bestScore) { bestScore = s; best = c.v; }
+      });
+      if (best) { m[k] = best; Store.set('songs', m, true); return best; }
+    }
+    m[k] = '';
+    Store.set('songs', m, true);
+    return null;
+  },
   // Is it already known (no lookup needed)?
   known(a, t, clean) {
     const m = this.load(), k = songKey(a, t);
-    if (clean) return m[k + '|clean'] !== undefined;
+    if (clean) return m[k + '|clean2'] !== undefined || (typeof Explicit !== 'undefined' && Explicit.known(a, t) === 'n' && (m[k] !== undefined || this.poolIndex().has(k)));
     return m[k] !== undefined || this.poolIndex().has(k);
   },
   // opts.clean: look for the clean or radio-edit version; opts.album: insist on the album version

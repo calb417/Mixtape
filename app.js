@@ -14,7 +14,7 @@ const CONFIG = {
 // =====================================================================
 
 // The version lives in index.html (<meta name="mixtape-version">) so the update check can compare it.
-const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.6';
+const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.7';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {

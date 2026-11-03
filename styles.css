@@ -381,3 +381,5 @@ select.field { -webkit-appearance: none; appearance: none; padding-right: 28px; 
 /* Setlist Study Guide */
 .swapbox { border: 1px dashed var(--line); border-radius: 12px; padding: 6px 10px; margin: 6px 0; }
 .swapbox .check { border-bottom: none; }
+.etag { display: inline-block; margin-left: 6px; padding: 0 4px; border-radius: 3px; background: var(--muted); color: var(--bg); font-family: var(--mono); font-size: 10px; font-weight: 700; line-height: 15px; vertical-align: 2px; }
+.etag.none { background: var(--accent); color: var(--on-accent); }
