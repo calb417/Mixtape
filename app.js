@@ -14,7 +14,7 @@ const CONFIG = {
 // =====================================================================
 
 // The version lives in index.html (<meta name="mixtape-version">) so the update check can compare it.
-const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.7';
+const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.8';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -591,7 +591,7 @@ Views.home = {
         <div class="tiles">
           ${tile('notes', 'Setlist Study Guide', typeof Study !== 'undefined' ? Study.tileText() : 'Prep for your next show', 'study')}
           ${tile('list', 'Playlist Builder', typeof Builder !== 'undefined' ? Builder.tileText() : 'Make playlists', 'builder')}
-          ${tile('pin', 'Concerts Near Me', 'Within 40 miles of Melville')}
+          ${tile('pin', 'Concerts Near Me', typeof Near !== 'undefined' ? Near.tileText() : 'Within 40 miles of Melville', 'near')}
           ${tile('diary', 'Concert Diary', diaryCount ? `${diaryCount} show${diaryCount === 1 ? '' : 's'} logged` : "Every show you've seen", 'diary')}
         </div>
         <button class="wide-tile" data-a="artists">
@@ -619,6 +619,7 @@ Views.home = {
       if (a === 'diary') go('#diary');
       if (a === 'builder') go('#builder');
       if (a === 'study') go('#study');
+      if (a === 'near') go('#near');
       if (a === 'soon') toast('Coming in a later update');
     });
     firstVisit('home');

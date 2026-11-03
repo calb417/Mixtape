@@ -584,9 +584,10 @@ const Cards = {
       <h3>Albums</h3><div data-albums><p class="muted">Loading…</p></div>
       <div data-tags></div>
       <div data-similar></div>
-      <p class="muted small">Upcoming shows arrive with the Concerts Near Me update.</p>
+      <div data-near></div>
       <div class="card-actions"><button class="btn small" data-myart="${esc(name)}"></button><button class="btn small" data-setlists="${esc(name)}" data-mbid="${esc(o.mbid || '')}">Setlists</button><button class="btn small" data-mix="artist" data-name="${esc(name)}">+ Playlist</button><button class="btn small" data-ytm="" data-q="${esc(name)}">${ICON.out} YouTube Music</button></div>`;
     this.myButton(box);
+    if (typeof nearLine !== 'undefined') nearLine(name).then((h) => this.set(box, '[data-near]', h)).catch(() => {});
     const lf = await LastFM.artistInfo(name).catch((e) => { if (/key/i.test(e.message)) throw e; return null; });
     const realName = (lf && lf.name) || name;
     this.set(box, '.hero-name', esc(realName));

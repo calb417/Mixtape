@@ -9,7 +9,7 @@
 //   KV namespace binding  MIXTAPE            (required for sync and Google sign-in)
 //   Variable  ALLOWED_ORIGIN  = https://calb417.github.io
 //   Variable  GOOGLE_CLIENT_ID     (from Google Cloud → Credentials → OAuth client)
-//   Secrets   GOOGLE_CLIENT_SECRET, LASTFM_KEY, YOUTUBE_KEY, SETLISTFM_KEY, TICKETMASTER_KEY
+//   Secrets   GOOGLE_CLIENT_SECRET, LASTFM_KEY, YOUTUBE_KEY, SETLISTFM_KEY, TICKETMASTER_KEY, SEATGEEK_ID
 //             (each optional until that part is used)
 
 const CODE_RE = /^[a-z]+-[a-z]+-\d{2,3}$/;
@@ -127,7 +127,7 @@ export default {
     if (!ok && !page2) return json({ error: 'not allowed' }, 403);
 
     try {
-      if (parts[0] === 'ping') return json({ ok: true, sync: !!env.MIXTAPE, keys: { lastfm: !!env.LASTFM_KEY, youtube: !!env.YOUTUBE_KEY, setlistfm: !!env.SETLISTFM_KEY, ticketmaster: !!env.TICKETMASTER_KEY, google: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) } });
+      if (parts[0] === 'ping') return json({ ok: true, sync: !!env.MIXTAPE, keys: { lastfm: !!env.LASTFM_KEY, youtube: !!env.YOUTUBE_KEY, setlistfm: !!env.SETLISTFM_KEY, ticketmaster: !!env.TICKETMASTER_KEY, seatgeek: !!env.SEATGEEK_ID, google: !!(env.GOOGLE_CLIENT_ID && env.GOOGLE_CLIENT_SECRET) } });
 
       /* ---------- Google sign-in ---------- */
       if (parts[0] === 'google') {
@@ -182,6 +182,10 @@ export default {
         if (!env.TICKETMASTER_KEY) return json({ error: 'no Ticketmaster key in the relay' }, 500);
         q.set('apikey', env.TICKETMASTER_KEY);
         target = 'https://app.ticketmaster.com/discovery/v2/' + parts.slice(1).map(encodeURIComponent).join('/') + '?' + q;
+      } else if (parts[0] === 'seatgeek') {
+        if (!env.SEATGEEK_ID) return json({ error: 'no SeatGeek client ID in the relay' }, 500);
+        q.set('client_id', env.SEATGEEK_ID);
+        target = 'https://api.seatgeek.com/2/' + parts.slice(1).map(encodeURIComponent).join('/') + '?' + q;
       } else {
         return json({ error: 'unknown' }, 404);
       }
