@@ -450,7 +450,7 @@ function openSetlist(s) {
           : `<button class="rowbtn" ${Cards.attrs('song', { artist: x.cover || s.artist, title: x.t })}><span><span class="num">${++num}</span>${esc(x.t)}${x.cover ? `<span class="muted small"> · ${esc(x.cover)} cover</span>` : ''}${x.with ? `<span class="muted small"> · with ${esc(x.with)}</span>` : ''}${x.info ? `<span class="muted small"> · ${esc(x.info)}</span>` : ''}</span></button>`).join('')}</div>`).join('') || '<p class="muted">No songs listed for this show.</p>'}
       ${s.info ? `<p class="muted small">${esc(s.info)}</p>` : ''}
       <div class="card-actions">
-        ${s.songs.length ? '<button class="btn small" data-l="mix">+ Playlist</button>' : ''}
+        ${s.songs.length ? `<button class="btn small primary" data-l="play">${ICON.play} Play</button><button class="btn small" data-l="mix">+ Playlist</button>` : ''}
         <button class="btn small" data-l="diary">I was there</button>
         <button class="btn small" data-l="open">${ICON.out} Open on setlist.fm</button>
       </div></div>`,
@@ -459,6 +459,7 @@ function openSetlist(s) {
         const b = e.target.closest('[data-l]');
         if (!b) return;
         if (b.dataset.l === 'open') window.open(SetlistFM.url(s), '_blank');
+        if (b.dataset.l === 'play') Music.play(s.songs.map((x) => ({ a: s.artist, t: x.t })), 0, { name: `${s.artist} · ${Study.fmt(s.date)}` });
         if (b.dataset.l === 'mix') Builder.chooseMix((mix) => { const n = Builder.addTo(mix, s.songs.map((x) => ({ a: s.artist, t: x.t }))); toast(`Added ${n} song${n === 1 ? '' : 's'} to ${mix.name}`); });
         if (b.dataset.l === 'diary') {
           const old = Diary.list().find((d) => d.date === s.date && (sim(d.artist, s.artist) >= 0.8 || (d.with || []).some((w) => sim(w, s.artist) >= 0.8)));
@@ -673,7 +674,7 @@ Views.study = {
         ${past ? this.actualSection(g) : ''}
         <div class="org-actions">
           <button class="btn primary wide" data-g="mix" ${n ? '' : 'disabled'}>${mix ? `Update the playlist (${n} songs)` : `Make playlist (${n} songs)`}</button>
-          ${mix ? '<button class="link-btn" data-g="openmix" style="display:block; margin:6px auto 0">Open it in Playlist Builder</button>' : ''}
+          <span class="row" style="justify-content:center; gap:18px; margin-top:6px">${n ? '<button class="link-btn" data-g="play">Play the study list</button>' : ''}${mix ? '<button class="link-btn" data-g="openmix">Open it in Playlist Builder</button>' : ''}</span>
         </div>
         <div class="pad" style="display:flex; flex-direction:column; align-items:center; gap:4px; margin-top:8px">
           ${past && g.actual && Object.keys(g.actual).length ? `<button class="btn small" data-g="diary">${g.diaryId ? 'Update the diary entry' : 'Add to Concert Diary'}</button>` : ''}
@@ -714,6 +715,7 @@ Views.study = {
         if (k === 'times') this.editTimes(id, draw);
         if (k === 'mix') Study.makePlaylist(g);
         if (k === 'openmix') go('#builder?mix=' + g.mixId);
+        if (k === 'play') { const m = g.mixId && Builder.get(g.mixId); Music.play(Study.picked(g), 0, { name: `${g.artist} study list`, playlist: m && m.saved && m.saved.id }); }
         if (k === 'diary') { Study.toDiary(g); draw(); }
         if (k === 'shows') { const a = g.acts[+b.dataset.a]; openArtistSetlists(a.name, a.mbid); }
         if (k === 'show') { const r = await SetlistFM.search({ artistMbid: g.acts[+b.dataset.a].mbid, date: SetlistFM.sfm(b.dataset.date) }); const s = r.list.find((x) => x.id === b.dataset.id) || r.list[0]; if (s) openSetlist(s); }

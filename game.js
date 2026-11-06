@@ -233,7 +233,8 @@ const Pool = {
   async build(f, mode, status) {
     if (mode === 'P') {
       const map = new Map();
-      f.playlists.forEach((id) => Store.get('pool.' + id, []).forEach((it) => { if (!map.has(it.v)) map.set(it.v, Object.assign({ src: 'playlist' }, it)); }));
+      // songs from an imported file have no video yet: they're looked up when drawn
+      f.playlists.forEach((id) => Store.get('pool.' + id, []).forEach((it) => { const k = it.v || songKey(it.a, it.t); if (!map.has(k)) map.set(k, Object.assign({ src: 'playlist' }, it)); }));
       this.list = shuffle([...map.values()]);
       return;
     }
@@ -1287,7 +1288,7 @@ const Game = {
           $b('[data-pl]').innerHTML = pools.map((p) => `<div class="pool-item">
             <button class="check ${draft.playlists.includes(p.id) ? 'on' : ''}" data-x="pl" data-id="${esc(p.id)}" aria-pressed="${draft.playlists.includes(p.id)}"><span class="box">${ICON.check}</span>
               <span class="main"><span class="n">${esc(p.name)}</span><span class="c">${p.count} songs · updated ${esc((p.updated || '').slice(0, 10))}</span></span></button>
-            <button class="btn small" data-x="refresh" data-id="${esc(p.id)}">Refresh</button>
+            ${p.id.startsWith('file:') ? '' : `<button class="btn small" data-x="refresh" data-id="${esc(p.id)}">Refresh</button>`}
             <button class="icon-btn" data-x="remove" data-id="${esc(p.id)}" aria-label="Remove ${esc(p.name)}">${ICON.close}</button></div>`).join('')
             || '<p class="muted small">No playlists yet.</p>';
         };

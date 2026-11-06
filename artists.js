@@ -161,7 +161,7 @@ Views.artists = {
 document.addEventListener('myartists', () => { if (currentView === Views.artists && Views.artists.render) Views.artists.render(); });
 
 /* ---------------- Add a batch of artists from a playlist ---------------- */
-function openBatchAdd(onDone) {
+function openBatchAdd(onDone, preset) {
   let rows = [];       // { name, count, on, have }
   Sheets.open({
     title: 'Add from a playlist',
@@ -198,6 +198,7 @@ function openBatchAdd(onDone) {
         $b('pick').dataset.title = title;
         $b('pick').scrollIntoView({ block: 'start', behavior: 'smooth' });
       };
+      if (preset) setTimeout(() => showPick(preset.name, preset.items), 0);
       body.addEventListener('input', (e) => {
         const t = e.target;
         if (t.dataset.b === 'name') { const r = rows[parseInt(t.dataset.i, 10)]; if (r) r.name = t.value; }

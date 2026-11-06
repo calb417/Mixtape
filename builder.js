@@ -602,14 +602,30 @@ const Job = {
   // regular version; explicit (or unknown) ones get a labeled clean version if YouTube has one, otherwise the
   // regular version, and they're listed at the end so you can swap them by hand.
   async video(j, s) {
-    if (!j.clean) return s.v || await SongFinder.find(s.a, s.t);
+    if (!j.clean) return this.lookup(j, s);
     const ex = await Explicit.check(s.a, s.t);
-    if (ex === 'n') return s.v || await SongFinder.find(s.a, s.t);
+    if (ex === 'n') return this.lookup(j, s);
     const c = await SongFinder.findClean(s.a, s.t);
     if (c) return c;
-    const v = s.v || await SongFinder.find(s.a, s.t);
+    const v = await this.lookup(j, s);
     if (v && ex === 'e') { j.unclean = j.unclean || []; if (!j.unclean.includes(`${s.t} — ${s.a}`)) j.unclean.push(`${s.t} — ${s.a}`); }
     return v;
+  },
+  // A song's regular version. When a save has 3 or more unknown songs by one artist, their YouTube "Topic"
+  // channel is read once (one lookup) instead of looking each song up.
+  async lookup(j, s) {
+    if (s.v) return s.v;
+    if (SongFinder.known(s.a, s.t)) return SongFinder.find(s.a, s.t);
+    if (!j.artistCounts) {
+      j.artistCounts = {};
+      (j.songs || []).forEach((x) => { if (!x.v && !SongFinder.known(x.a, x.t)) { const k = norm(MyArtists.cleanName(x.a)); j.artistCounts[k] = (j.artistCounts[k] || 0) + 1; } });
+    }
+    if ((j.artistCounts[norm(MyArtists.cleanName(s.a))] || 0) >= 3) {
+      const cat = await SongFinder.topicCatalog(MyArtists.cleanName(s.a));
+      const v = cat.get(norm(cleanTitle(s.t)));
+      if (v) { SongFinder.remember(s.a, s.t, v); return v; }
+    }
+    return SongFinder.find(s.a, s.t);
   },
   // Adding a song; a playlist made moments ago can say "not found" for a few seconds, so wait and try again
   async insert(playlistId, v, position) {
@@ -801,7 +817,7 @@ Views.builder = {
           <button class="btn small" data-e="pl">From a playlist</button>
         </div>
         <div class="pad my-head"><span class="muted small">${n} song${n === 1 ? '' : 's'}${n ? ' · drag ≡ to move' : ''}</span>
-          <span class="row" style="gap:14px">${n > 1 ? '<button class="link-btn" data-e="sort">Sort</button>' : ''}${n ? '<button class="link-btn" data-e="clear">Clear</button>' : ''}</span></div>
+          <span class="row" style="gap:14px">${n ? '<button class="link-btn" data-e="play">Play</button>' : ''}${n > 1 ? '<button class="link-btn" data-e="sort">Sort</button>' : ''}${n ? '<button class="link-btn" data-e="clear">Clear</button>' : ''}</span></div>
         ${n ? `<div class="my-list mx-list" data-e="list">${shown.map((s, i) => `<div class="mx-row" data-i="${i}">
               <span class="grip" aria-label="Drag to move">≡</span>
               <button class="mx-main" ${Cards.attrs('song', { artist: s.a, title: s.t, v: s.v })}><span class="num">${i + 1}</span><span class="tx"><span class="n">${esc(s.t)}${mix.clean ? explicitTag(s) : ''}</span><span class="c">${esc(s.a)}</span></span></button>
@@ -863,6 +879,7 @@ Views.builder = {
         if (k === 'pl') Builder.openPlaylists(mix, draw);
         if (k === 'sort') Builder.openSort(mix, draw);
         if (k === 'all') { showAll = true; draw(); }
+        if (k === 'play') Music.play(mix.songs, 0, { name: mix.name, playlist: mix.saved && mix.saved.id });
         if (k === 'del') { mix.songs.splice(parseInt(b.dataset.i, 10), 1); Builder.put(mix); draw(); }
         if (k === 'clear') { if (confirm(`Remove all ${mix.songs.length} songs from this list?`)) { mix.songs = []; Builder.put(mix); draw(); } }
         if (k === 'priv') { mix.privacy = b.dataset.v; Builder.put(mix); draw(); }
@@ -1040,7 +1057,7 @@ Views.organize = {
       $o('head').innerHTML = `<div style="font-family: var(--display); font-weight: 700; font-size: 22px">${esc(name)}</div>
         <div class="row" style="align-items:center; justify-content:space-between; gap:10px; margin-top:4px">
           <span class="muted small" data-o="count">${all.length ? `${all.length} songs${gone ? ` · ${gone} unavailable` : ''}` : 'Reading…'}</span>
-          <span class="row" style="gap:14px"><button class="link-btn" data-o="refresh">Refresh</button><button class="link-btn" data-o="ytm">Open ↗</button></span></div>
+          <span class="row" style="gap:14px"><button class="link-btn" data-o="play">Play</button><button class="link-btn" data-o="refresh">Refresh</button><button class="link-btn" data-o="ytm">Open ↗</button></span></div>
         ${Organize.sortedPlaylists()[id] ? `<p class="muted small" style="margin:4px 0 0">Kept sorted: ${esc(SORTS[Organize.sortedPlaylists()[id]].toLowerCase())}.</p>` : ''}`;
     };
     const tabs = () => {
@@ -1160,6 +1177,7 @@ Views.organize = {
         if (k === 'help') showHelp('organize');
         if (k === 'refresh') load(true);
         if (k === 'ytm') window.open(Builder.ytmUrl(id), '_blank');
+        if (k === 'play') Music.play(items().filter((x) => !x.gone), 0, { name, playlist: id });
         if (k === 'tab') { this.tab = b.dataset.t; this.sel = new Set(); this.dupesFresh = null; tabs(); body(); }
         if (k === 'tick') { const p = b.dataset.p; if (this.sel.has(p)) this.sel.delete(p); else this.sel.add(p); refresh(); }
         if (k === 'all') { (this.shown || []).forEach((x) => this.sel.add(x.pid)); refresh(); }
@@ -1219,3 +1237,170 @@ HELP.organize = {
     <li><b>Duplicates</b>: songs that are in more than once. The extra copies are ticked for removal.</li></ul>
     <p>Each move, removal or addition costs 50 of YouTube's 10,000 free daily units, so sorting a big playlist runs over several days. Keep Mixtape open while it works; it carries on by itself the next time it's open.</p>`,
 };
+
+/* ---------------- Import a playlist file (Settings → More) ---------------- */
+const PlaylistImport = {
+  // "Beatles, The" → "The Beatles"
+  artist(a) { a = String(a || '').replace(/_/g, ' ').trim(); const m = a.match(/^(.*),\s*(the|a|an)$/i); return m ? `${m[2][0].toUpperCase()}${m[2].slice(1).toLowerCase()} ${m[1]}` : a; },
+  // A file name → song title: no extension, track numbers or a repeated artist name
+  title(file, artist) {
+    let t = String(file || '').replace(/\.[a-z0-9]{2,4}$/i, '').replace(/_/g, ' ').trim();
+    t = t.replace(/^(\d{1,2}[-.]\s?)?\d{1,3}\s*[-–.)]?\s+/, '');                       // "01 - ", "1-01 ", "03. "
+    if (artist) { const parts = t.split(/\s[-–]\s/); if (parts.length > 1 && sim(parts[0], artist) >= 0.8) t = parts.slice(1).join(' - '); }
+    return t.trim();
+  },
+  fromPath(p) {
+    let path = String(p || '').trim();
+    try { if (/%[0-9a-f]{2}/i.test(path)) path = decodeURIComponent(path); } catch (e) { /* keep as is */ }
+    const parts = path.replace(/^file:\/+/i, '/').split(/[\\/]/).filter(Boolean);
+    const file = parts.pop() || '', album = parts.pop() || '', art = parts.pop() || '';
+    const a = this.artist(art && !/^(music|volume\d*|share|homes?|[a-z]:)$/i.test(art) ? art : '');
+    return { a, t: this.title(file, a), album };
+  },
+  fromLine(line) {
+    const m = String(line).match(/^(.+?)\s[-–—]\s(.+)$/);
+    return m ? { a: this.artist(m[1]), t: m[2].trim() } : { a: '', t: String(line).trim() };
+  },
+  csvRow(line) {
+    const out = []; let cur = '', q = false;
+    for (let i = 0; i < line.length; i++) {
+      const c = line[i];
+      if (q) { if (c === '"' && line[i + 1] === '"') { cur += '"'; i++; } else if (c === '"') q = false; else cur += c; }
+      else if (c === '"') q = true; else if (c === ',' || c === '\t' || c === ';') { out.push(cur.trim()); cur = ''; } else cur += c;
+    }
+    out.push(cur.trim());
+    return out;
+  },
+  parse(text, fileName = '') {
+    const lines = String(text || '').replace(/^﻿/, '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const ext = (fileName.match(/\.([a-z0-9]+)$/i) || [])[1] || '';
+    const songs = [];
+    if (/^m3u8?$/i.test(ext) || lines[0] === '#EXTM3U' || lines.some((l) => /^#EXTINF/i.test(l))) {
+      let info = null;
+      lines.forEach((l) => {
+        if (/^#EXTINF/i.test(l)) { info = l.replace(/^#EXTINF:[^,]*,/i, ''); return; }
+        if (l.startsWith('#')) return;
+        const fromPath = this.fromPath(l);
+        const fromInfo = info ? this.fromLine(info) : null;
+        songs.push(fromInfo && fromInfo.a ? Object.assign(fromInfo, { album: fromPath.album }) : fromPath);
+        info = null;
+      });
+    } else if (/^pls$/i.test(ext) || /^\[playlist\]$/i.test(lines[0])) {
+      const files = {}, titles = {};
+      lines.forEach((l) => { let m = l.match(/^File(\d+)=(.*)$/i); if (m) files[m[1]] = m[2]; m = l.match(/^Title(\d+)=(.*)$/i); if (m) titles[m[1]] = m[2]; });
+      Object.keys(files).sort((a, b) => a - b).forEach((n) => { const t = titles[n] && this.fromLine(titles[n]); songs.push(t && t.a ? t : this.fromPath(files[n])); });
+    } else if (/^wpl$/i.test(ext) || /<smil/i.test(text)) {
+      const ent = (s) => s.replace(/&amp;/g, '&').replace(/&apos;/g, "'").replace(/&quot;/g, '"').replace(/&lt;/g, '<').replace(/&gt;/g, '>');
+      (text.match(/<media[^>]+src="([^"]+)"/gi) || []).forEach((m) => songs.push(this.fromPath(ent(m.match(/src="([^"]+)"/i)[1]))));
+    } else {
+      // text or CSV: "Artist - Title" per line, or columns with an Artist and a Title header
+      const head = this.csvRow(lines[0]).map((h) => h.toLowerCase());
+      const ai = head.findIndex((h) => /^(artist|artist name|artists?\(s\)|band)$/.test(h)), ti = head.findIndex((h) => /^(title|song|track|track name|name|song name)$/.test(h));
+      if (ai >= 0 && ti >= 0) lines.slice(1).forEach((l) => { const r = this.csvRow(l); songs.push({ a: this.artist(r[ai] || ''), t: (r[ti] || '').trim() }); });
+      else lines.forEach((l) => {
+        const r = /[,\t]/.test(l) && !/\s[-–—]\s/.test(l) ? this.csvRow(l) : null;
+        songs.push(r && r.length >= 2 ? { a: this.artist(r[0]), t: r[1] } : this.fromLine(l.replace(/^\d+[.)]\s*/, '')));
+      });
+    }
+    const seen = new Set();
+    return songs.filter((s) => s.t).map((s) => {
+      s.ok = !!(s.a && s.t && s.t.length < 120 && !/\.(mp3|m4a|flac|wav|aac|ogg)$/i.test(s.t) && !/^(unknown|various)( artists?)?$/i.test(s.a) && !/^track \d+$/i.test(s.t));
+      return s;
+    }).filter((s) => { const k = songKey(s.a, s.t); if (seen.has(k)) return false; seen.add(k); return true; });
+  },
+};
+async function readTextFile(file) {
+  const buf = await file.arrayBuffer();
+  let text = new TextDecoder('utf-8').decode(buf);
+  if (text.includes('�')) { try { text = new TextDecoder('windows-1252').decode(buf); } catch (e) { /* keep utf-8 */ } }
+  return text;
+}
+function openImport() {
+  let songs = [], name = '';
+  Sheets.open({
+    title: 'Import a playlist file',
+    html: `<p class="muted small" style="margin-top:0">M3U / M3U8 (Audio Station and most music apps), PLS, WPL, or a text or CSV file with one “Artist - Title” per line. You can also paste a list.</p>
+      <label class="btn wide" style="position:relative; overflow:hidden">Choose a file<input type="file" data-i="file" accept=".m3u,.m3u8,.pls,.wpl,.txt,.csv,.tsv,audio/x-mpegurl,audio/mpegurl,text/plain,text/csv" style="position:absolute; inset:0; opacity:0"></label>
+      <details class="add-pl"><summary>Paste a list instead</summary>
+        <textarea class="field" data-i="paste" rows="6" placeholder="Tom Petty - Free Fallin'&#10;Oasis - Live Forever" style="width:100%; height:auto; padding:10px"></textarea>
+        <div class="row" style="margin-top:8px"><button class="btn small primary" data-i="read">Read the list</button></div></details>
+      <div data-i="review"></div>`,
+    onMount(body, close) {
+      const $i = (k) => body.querySelector(`[data-i=${k}]`);
+      const review = () => {
+        const bad = songs.map((s, i) => [s, i]).filter(([s]) => !s.ok && !s.skip);
+        const keep = songs.filter((s) => !s.skip);
+        $i('review').innerHTML = `<h3>Review</h3>
+          <label class="flabel">Name<input class="field" data-i="name" value="${esc(name)}" autocomplete="off"></label>
+          <p class="small">${keep.length} song${keep.length === 1 ? '' : 's'}${bad.length ? ` · <b style="color:var(--accent)">${bad.length} didn't read cleanly</b>: fix the artist and title, or skip them.` : ' · all read cleanly.'}</p>
+          ${bad.length ? `<div class="rows">${bad.slice(0, 100).map(([s, i]) => `<div class="fixrow"><div class="row" style="gap:6px"><input class="field slim" data-i="a" data-n="${i}" value="${esc(s.a)}" placeholder="Artist" autocomplete="off"><input class="field slim" data-i="t" data-n="${i}" value="${esc(s.t)}" placeholder="Title" autocomplete="off"></div>
+              <span class="row" style="gap:14px"><button class="link-btn" data-i="ok" data-n="${i}">Looks right</button><button class="link-btn" data-i="skip" data-n="${i}">Skip</button></span></div>`).join('')}</div>
+            ${bad.length > 100 ? `<p class="muted small">…and ${bad.length - 100} more. <button class="link-btn" data-i="skipall">Skip all of these</button></p>` : `<button class="link-btn" data-i="skipall">Skip all of these</button>`}` : ''}
+          <details class="add-pl"><summary>All ${keep.length} songs</summary><div class="rows">${keep.slice(0, 300).map((s) => `<div class="rowbtn"><span>${esc(s.t)}<span class="muted small" style="display:block">${esc(s.a || '?')}</span></span></div>`).join('')}</div>${keep.length > 300 ? `<p class="muted small">…and ${keep.length - 300} more.</p>` : ''}</details>
+          <h3>Use it for</h3>
+          <div style="display:flex; flex-direction:column; gap:10px">
+            <button class="btn primary" data-i="game">${ICON.play} The game</button>
+            <button class="btn" data-i="mix">A Playlist Builder playlist</button>
+            <button class="btn" data-i="artists">Adding its artists to My Artists</button>
+          </div>
+          <p class="muted small">Whichever you pick, it's also saved with your playlists, so the game, Playlist Builder and My Artists can use it later. In the game each song is looked up on YouTube when it comes up, so a big file plays right away.</p>`;
+      };
+      const load = (text, fname) => {
+        songs = PlaylistImport.parse(text, fname);
+        if (!songs.length) { $i('review').innerHTML = '<p class="small" style="color:var(--accent)">No songs found in that. Is it a playlist file?</p>'; return; }
+        name = (fname || 'Pasted list').replace(/\.[a-z0-9]+$/i, '').replace(/_/g, ' ');
+        review();
+        $i('review').scrollIntoView({ block: 'start', behavior: 'smooth' });
+      };
+      // Saved like a YouTube playlist (but with no videos yet) so every section can pick it
+      const save = () => {
+        const list = songs.filter((s) => !s.skip && s.a && s.t).map((s) => ({ a: s.a, t: s.t }));
+        if (!list.length) { toast('No songs left to import'); return null; }
+        const id = 'file:' + Date.now().toString(36);
+        Store.set('pool.' + id, list);
+        const pools = Store.get('pools', []);
+        pools.push({ id, name: name || 'Imported playlist', count: list.length, updated: new Date().toISOString(), file: true });
+        Store.set('pools', pools);
+        SongFinder.forget();
+        return { id, list };
+      };
+      $i('file').addEventListener('change', async (e) => {
+        const f = e.target.files && e.target.files[0];
+        if (!f) return;
+        try { load(await readTextFile(f), f.name); } catch (err) { Errors.show('Could not read that file: ' + (err.message || err), err); }
+      });
+      body.addEventListener('input', (e) => {
+        const t = e.target, n = t.dataset.n != null ? +t.dataset.n : -1;
+        if (t.dataset.i === 'name') name = t.value;
+        if (t.dataset.i === 'a' && songs[n]) songs[n].a = t.value.trim();
+        if (t.dataset.i === 't' && songs[n]) songs[n].t = t.value.trim();
+      });
+      body.addEventListener('click', (e) => {
+        const b = e.target.closest('[data-i]');
+        if (!b || b.tagName === 'INPUT' || b.tagName === 'TEXTAREA' || b.tagName === 'LABEL') return;
+        const k = b.dataset.i, n = b.dataset.n != null ? +b.dataset.n : -1;
+        if (k === 'read') load($i('paste').value, '');
+        if (k === 'ok' && songs[n]) { if (songs[n].a && songs[n].t) songs[n].ok = true; else { toast('Fill in both the artist and the title'); return; } review(); }
+        if (k === 'skip' && songs[n]) { songs[n].skip = true; review(); }
+        if (k === 'skipall') { songs.forEach((s) => { if (!s.ok) s.skip = true; }); review(); }
+        if (k === 'game') {
+          const r = save(); if (!r) return;
+          Pool.set(Object.assign(Pool.defaults(), { playlists: [r.id], hits: Pool.get().hits }));
+          if (typeof Game !== 'undefined') { Game.round = null; Game.mode = 'guess'; }
+          close(); toast(`Game pool: ${name}`); go('#game');
+        }
+        if (k === 'mix') {
+          const r = save(); if (!r) return;
+          const m = Builder.create(name);
+          Builder.addTo(m, r.list);
+          close(); go('#builder?mix=' + m.id);
+        }
+        if (k === 'artists') {
+          const r = save(); if (!r) return;
+          close();
+          setTimeout(() => openBatchAdd(null, { name, items: r.list }), 330);
+        }
+      });
+    },
+  });
+}

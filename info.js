@@ -420,6 +420,40 @@ const SongFinder = {
   },
   forget() { this.idx = null; },
   remember(a, t, v) { const m = this.load(); m[songKey(a, t)] = v; Store.set('songs', m, true); },
+  // An artist's whole album catalog from their YouTube "Topic" channel: one lookup for every song by them.
+  // Returns a Map of song title → video (empty when there's no Topic channel). Remembered for 30 days.
+  async topicCatalog(artist) {
+    const cache = Store.get('topicCat', {}), k = norm(artist);
+    if (cache[k] && Date.now() - cache[k].at < 30 * 864e5) return new Map(cache[k].list);
+    if (this.used() >= DAILY_LOOKUPS) throw new LimitError(`Today's ${DAILY_LOOKUPS} song lookups are used up. The count resets overnight (midnight Pacific).`);
+    this.count();
+    const s = await YTData.get('search', { part: 'snippet', type: 'channel', maxResults: 5, q: `${artist} - Topic` });
+    const ch = (s.items || []).find((it) => { const t = (it.snippet && (it.snippet.channelTitle || it.snippet.title)) || ''; return / - Topic$/i.test(t) && sim(t.replace(/ - Topic$/i, ''), artist) >= 0.85; });
+    const list = [];
+    if (ch) {
+      try {
+        const c = await YTData.get('channels', { part: 'contentDetails', id: (ch.id && ch.id.channelId) || ch.snippet.channelId });
+        const up = c.items && c.items[0] && c.items[0].contentDetails.relatedPlaylists.uploads;
+        if (up) {
+          const seen = new Set();
+          let pageToken = '', pages = 0;
+          do {
+            const j = await YTData.get('playlistItems', { part: 'snippet', playlistId: up, maxResults: 50, pageToken });
+            (j.items || []).forEach((it) => {
+              const sn = it.snippet || {}, v = sn.resourceId && sn.resourceId.videoId, t = norm(cleanTitle(decodeEntities(sn.title || '')));
+              if (v && t && !seen.has(t)) { seen.add(t); list.push([t, v]); }
+            });
+            pageToken = j.nextPageToken || '';
+          } while (pageToken && ++pages < 30);
+        }
+      } catch (e) { if (e instanceof LimitError) throw e; }   // no catalog: songs are looked up one at a time instead
+    }
+    cache[k] = { at: Date.now(), list: list.slice(0, 1500) };
+    const keys = Object.keys(cache);
+    if (keys.length > 25) keys.sort((a, b) => cache[a].at - cache[b].at).slice(0, keys.length - 25).forEach((x) => delete cache[x]);
+    try { localStorage.setItem('mixtape.topicCat', JSON.stringify(cache)); } catch (e) { /* full: it's only a shortcut */ }
+    return new Map(cache[k].list);
+  },
   // A clean version YouTube has labeled as one ("Clean", "Radio Edit", "Edited"). Tries up to three
   // searches; remembers the answer, including "none found" (''). Returns the video or null.
   async findClean(a, t) {
@@ -755,7 +789,7 @@ const Cards = {
       <div class="facts" data-facts><p class="muted">Loading…</p></div>
       <div data-writers></div>
       <div data-about></div><div class="chips" data-tags></div>
-      <div class="card-actions"><button class="btn small" data-mix="song" data-artist="${esc(artist)}" data-title="${esc(title)}" data-v="${esc(o.v || '')}">+ Playlist</button><button class="btn small" data-open="https://genius.com/search?q=${encodeURIComponent(artist + ' ' + title)}">Lyrics</button>
+      <div class="card-actions"><button class="btn small primary" data-play data-artist="${esc(artist)}" data-title="${esc(title)}" data-v="${esc(o.v || '')}">${ICON.play} Play</button><button class="btn small" data-mix="song" data-artist="${esc(artist)}" data-title="${esc(title)}" data-v="${esc(o.v || '')}">+ Playlist</button><button class="btn small" data-open="https://genius.com/search?q=${encodeURIComponent(artist + ' ' + title)}">Lyrics</button>
         <button class="btn small" data-ytm="${esc(o.v || '')}" data-q="${esc(artist + ' ' + title)}">${ICON.out} YouTube Music</button></div>
       <p class="muted small" data-tourline></p>`;
     if (typeof songTourLine !== 'undefined') songTourLine(artist, title).then((t) => this.set(box, '[data-tourline]', esc(t))).catch(() => {});

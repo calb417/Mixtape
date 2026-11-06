@@ -14,7 +14,7 @@ const CONFIG = {
 // =====================================================================
 
 // The version lives in index.html (<meta name="mixtape-version">) so the update check can compare it.
-const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.8';
+const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.9';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -678,6 +678,7 @@ Views.settings = {
           <div class="li"><span>Colors</span><button class="btn small" data-a="resetColors">Reset to black and orange</button></div>
           <div class="li" style="display:block"><div>Your own YouTube key (optional)<div class="sub">Leave empty to use the built-in key. A personal key gets its own daily limit.</div></div>
             <input class="field" style="margin-top:8px" data-s="ytKey" value="${esc(s.ytKey)}" placeholder="Paste a key, or leave empty" autocomplete="off" autocapitalize="off" spellcheck="false"></div>
+          <div class="li"><span>Import a playlist file<div class="sub">M3U, PLS, WPL, text or CSV (for example a playlist exported from Synology Audio Station)</div></span><button class="btn small" data-a="importpl">Import</button></div>
           <div class="li"><span>Accuracy log<div class="sub">How the study guides did, as a file to share with Claude to tune them</div></span><button class="btn small" data-a="acclog">Export</button></div>
           <div class="li"><span>Error log<div class="sub">${Store.get('errorlog', []).length} saved</div></span><button class="btn small" data-a="errors">View</button></div>
           <div class="li"><span>Version</span><span class="muted mono">${APP_VERSION}</span></div>
@@ -697,6 +698,7 @@ Views.settings = {
       if (a === 'pools') Game.openPools(() => route());
       if (a === 'export') Backup.export();
       if (a === 'acclog' && typeof Study !== 'undefined') Study.exportLog();
+      if (a === 'importpl' && typeof openImport !== 'undefined') openImport();
       if (a === 'syncStart') {
         b.disabled = true;
         Sync.start().then((code) => { toast('Syncing. Code: ' + code); route(); }).catch((err) => { b.disabled = false; Errors.show('Could not start syncing: ' + (err.message || err)); });
