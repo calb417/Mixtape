@@ -1,20 +1,20 @@
 'use strict';
 
 // =====================================================================
-//  YOUR KEYS — this is the only block you ever need to edit.
-//  Paste each key between its quotes.
+//  SETTINGS — the keys now live in the relay (Cloudflare secrets), not here.
 // =====================================================================
 const CONFIG = {
-  YOUTUBE_API_KEY: 'AIzaSyDz0tlqHQZU8WFEoCWcc6w4VnK01l9sZYY',
-  LASTFM_API_KEY: '506225735c83135da4286cc87db378b0',
-  // The Mixtape relay's address (from Cloudflare), e.g. 'https://mixtape-relay.yourname.workers.dev'.
-  // Leave empty until the relay is set up. Once it holds the keys, the two keys above can be emptied.
+  // Left empty on purpose: YouTube and Last.fm are called through the relay, which holds the keys.
+  // (Anyone can still add their own YouTube key in Settings for their own daily limit.)
+  YOUTUBE_API_KEY: '',
+  LASTFM_API_KEY: '',
+  // The Mixtape relay's address (from Cloudflare).
   RELAY_URL: 'https://mixtape-relay.charlie-albano.workers.dev',
 };
 // =====================================================================
 
 // The version lives in index.html (<meta name="mixtape-version">) so the update check can compare it.
-const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.9';
+const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.10';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -365,9 +365,10 @@ const YTData = {
     // Signed in with Google: playlists are read with the sign-in, so private ones work too
     if (/^(playlists|playlistItems)$/.test(path) && typeof Google !== 'undefined' && Google.on()) return this.auth('GET', path, params);
     // Through the relay when it holds a YouTube key (and no personal key is set); otherwise straight to Google.
-    const viaRelay = typeof Sync !== 'undefined' && Sync.has('youtube') && !(Settings.get().ytKey || '').trim();
+    // Through the relay (it holds the key) unless a personal key is set in Settings
+    const viaRelay = typeof Sync !== 'undefined' && !!Sync.url() && !(Settings.get().ytKey || '').trim() && (Sync.has('youtube') || !CONFIG.YOUTUBE_API_KEY);
     const key = viaRelay ? '' : this.key();
-    if (!viaRelay && (!key || key.startsWith('PASTE-'))) throw new ApiError('No YouTube key yet. Open app.js on GitHub and paste your key in the marked spot at the top.');
+    if (!viaRelay && (!key || key.startsWith('PASTE-'))) throw new ApiError('No YouTube key: the relay needs its YOUTUBE_KEY secret in Cloudflare (or add your own key in Settings).');
     const url = new URL(viaRelay ? `${Sync.url()}/youtube/${path}` : 'https://www.googleapis.com/youtube/v3/' + path);
     Object.entries(Object.assign({}, params, key ? { key } : {})).forEach(([k, v]) => { if (v != null && v !== '') url.searchParams.set(k, v); });
     let r;

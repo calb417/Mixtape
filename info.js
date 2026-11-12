@@ -46,11 +46,11 @@ const NOT_STUDIO = /[\(\[\-–]\s*[^\)\]]*\b(live|demo|acoustic|instrumental|kar
 const LastFM = {
   mem: new Map(),
   key() { return String(CONFIG.LASTFM_API_KEY || '').trim(); },
-  relay() { return typeof Sync !== 'undefined' && Sync.has('lastfm'); },
+  relay() { return typeof Sync !== 'undefined' && !!Sync.url() && (Sync.has('lastfm') || !this.key()); },
   ready() { if (this.relay()) return true; const k = this.key(); return !!k && !k.startsWith('PASTE-'); },
   arr(x) { return x == null ? [] : Array.isArray(x) ? x : [x]; },
   async call(method, params = {}) {
-    if (!this.ready()) throw new ApiError('No Last.fm key yet. Open app.js on GitHub and paste your Last.fm key in the marked spot at the top.');
+    if (!this.ready()) throw new ApiError('No Last.fm key: the relay needs its LASTFM_KEY secret in Cloudflare.');
     const viaRelay = this.relay();
     const url = new URL(viaRelay ? Sync.url() + '/lastfm' : 'https://ws.audioscrobbler.com/2.0/');
     url.searchParams.set('method', method);
