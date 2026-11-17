@@ -173,15 +173,24 @@ const DEC = { '50s': { tag: '50s', from: 1950 }, '60s': { tag: '60s', from: 1960
 const HOLIDAY_RE = /christmas|xmas|x-mas|\bsanta\b|\bjingle|\bsleigh|mistletoe|reindeer|rudolph|\bnoel\b|nowell|navidad|\byule|snowman|frosty|holly jolly|silent night|holy night|winter wonderland|let it snow|nutcracker|sugar plum|carol of the|hanukk?ah|chanukah|dreidel|kwanzaa|chestnuts|joy to the world|o come,? all ye|\bhark\b|deck the hall|silver bells|little drummer|away in a manger|three kings|twelve days|mele kalikimaka|happy holiday|merry little|cold outside|most wonderful time|god rest ye/i;
 const Holiday = {
   data: null, loading: null,
+  // The list is kept on this phone for a week (it's needed to keep holiday songs out of the other pools too)
+  use(list) {
+    const byTitle = new Map();
+    list.forEach((x, i) => { const k = norm(x.t); if (!byTitle.has(k)) byTitle.set(k, []); byTitle.get(k).push({ a: x.a, i }); });
+    this.data = { list, byTitle };
+    return this.data;
+  },
   load() {
     if (this.data) return Promise.resolve(this.data);
+    const kept = Store.get('holidayList', null);
+    if (kept && Array.isArray(kept.list) && kept.list.length > 20 && Date.now() - kept.at < 7 * 864e5) return Promise.resolve(this.use(kept.list));
     if (!this.loading) {
       this.loading = (async () => {
         const soft = (e) => { if (e instanceof ApiError && /key|busy|reach/i.test(e.message)) throw e; return []; };
         const lists = [];
         for (const [tag, pages] of [['christmas', 4], ['xmas', 2], ['christmas music', 1]]) lists.push(await LastFM.tagTopTracks(tag, pages).catch(soft));
         // Interleave by rank, so a song high on any of the lists stays near the front
-        const seen = new Set(), list = [], byTitle = new Map();
+        const seen = new Set(), list = [];
         const longest = Math.max(0, ...lists.map((l) => l.length));
         for (let i = 0; i < longest; i++) lists.forEach((l) => {
           const x = l[i];
@@ -191,9 +200,8 @@ const Holiday = {
           seen.add(k);
           list.push(x);
         });
-        list.forEach((x, i) => { const k = norm(x.t); if (!byTitle.has(k)) byTitle.set(k, []); byTitle.get(k).push({ a: x.a, i }); });
-        this.data = { list, byTitle };
-        return this.data;
+        if (list.length > 20) Store.set('holidayList', { at: Date.now(), list: list.map((x) => ({ a: x.a, t: x.t })) }, true);
+        return this.use(list);
       })();
       this.loading.catch(() => { this.loading = null; });
     }
@@ -264,7 +272,7 @@ const Pool = {
     if (names.length) parts.push(names.join(' + '));
     if (f.useMy) parts.push('My Artists' + (f.artists.length ? ' + ' + f.artists.map((a) => a.name).join(' + ') : ''));
     else if (f.artists.length) parts.push(f.artists.map((a) => a.name).join(' + '));
-    if (f.holiday) parts.push('Christmas & holiday');
+    if (f.holiday) parts.push('Holiday');
     if (f.decades.length) parts.push(f.decades.join(' + '));
     if (f.genres.length && !this.artistList(f).length) parts.push(f.genres.join(' + '));
     if (f.hits) parts.push(this.hitsText(f.hits).toLowerCase());
@@ -386,6 +394,7 @@ const Pool = {
     if (this.seen.has(k) || (c.v && (this.seen.has(c.v) || blocked.has(c.v)))) return null;
     if (this.useRecent) { const rec = this.loadRecent(); if (rec.has(k) || (c.v && rec.has(c.v))) return null; }
     if (spread && mode !== 'A' && this.lastArtists.includes(norm(c.a))) { this.spreadSkips++; return null; }   // not the same artist again so soon
+    if (!f.holiday && Holiday.is(await Holiday.load().catch(() => null), c.a, c.t)) { this.holidaySkips = (this.holidaySkips || 0) + 1; return null; }   // holiday songs only with the Holiday chip on
     if (mode === 'P' || mode === 'H') {
       const al = this.artistList(f);
       if (mode === 'P' && al.length) {
@@ -427,13 +436,18 @@ const Pool = {
     }
     return { v, a: c.a, t: c.t };
   },
+  // The pool can change without the pool sheet (sync from the other phone): start fresh when it does
+  fresh(f) { const k = JSON.stringify(f); if (this.builtFor !== k) { if (this.builtFor !== undefined) this.reset(); this.builtFor = k; } },
   async next(status = () => {}) {
-    const f = this.get(), mode = this.mode(f), gen = this.gen;
+    const f = this.get();
+    this.fresh(f);
+    const mode = this.mode(f), gen = this.gen;
     if (mode !== 'P' && !LastFM.ready()) throw new ApiError('No Last.fm key yet. Open app.js on GitHub and paste your Last.fm key in the marked spot at the top. (Playlists work without it.)');
     if (!this.building) { this.building = this.build(f, mode, status); this.building.catch(() => { if (gen === this.gen) this.building = null; }); }
     await this.building;
     let tried = 0, spread = true;
     this.misses = 0;
+    this.holidaySkips = 0;
     this.spreadSkips = 0;
     for (;;) {
       if (gen !== this.gen) return null;
@@ -467,13 +481,22 @@ const Pool = {
       if (item) { this.seen.add(songKey(item.a, item.t)); this.seen.add(item.v); this.remember(item); return item; }
     }
   },
+  // Why a pool came up empty, for the caption
+  emptyText() {
+    return this.holidaySkips
+      ? 'No songs fit this pool. Its holiday songs are left out while Holiday is off: tap the pool bar and turn on Holiday to play them.'
+      : 'No songs fit this pool. Tap the pool bar to change it.';
+  },
   // A handful of songs from the pool to show the DJ (not yet checked against decades or YouTube)
   async sample(n = 30) {
-    const f = this.get(), mode = this.mode(f), gen = this.gen;
+    const f = this.get();
+    this.fresh(f);
+    const mode = this.mode(f), gen = this.gen;
     if (mode !== 'P' && !LastFM.ready()) throw new ApiError('No Last.fm key yet. Open app.js on GitHub and paste your Last.fm key in the marked spot at the top.');
     if (!this.building) { this.building = this.build(f, mode, () => {}); this.building.catch(() => { if (gen === this.gen) this.building = null; }); }
     await this.building;
-    const fresh = (c) => !this.seen.has(songKey(c.a, c.t));
+    const d = f.holiday ? null : await Holiday.load().catch(() => null);
+    const fresh = (c) => !this.seen.has(songKey(c.a, c.t)) && (f.holiday || !Holiday.is(d, c.a, c.t));
     if (mode === 'P' || mode === 'H') return shuffle(this.list.filter(fresh)).slice(0, n);
     const live = this.arts.filter((e) => !e.done);
     const arts = mode === 'A' ? shuffle(live).slice(0, 8) : shuffle(live.slice(0, 30)).slice(0, 10);
@@ -804,7 +827,7 @@ const Game = {
     if (!item) {
       const f = Pool.get();
       const empty = !f.playlists.length && !Pool.artistList(f).length && !f.holiday && !f.genres.length && !f.decades.length && !LastFM.ready();
-      this.caption(empty ? 'Pick a pool to start' : 'No songs fit this pool. Tap the pool bar to change it.');
+      this.caption(empty ? 'Pick a pool to start' : Pool.emptyText());
       if (empty) setTimeout(() => this.openPools(() => { this.round = null; route(); }), 400);
       return;
     }
@@ -1426,7 +1449,7 @@ const Game = {
     try {
       const item = await Pool.take(say);
       if (seq !== this.roundSeq) return;
-      if (!item) { say('No songs fit this pool. Tap the pool bar to change it.'); return; }
+      if (!item) { say(Pool.emptyText()); return; }
       this.startRound(item);
     } catch (e) {
       say('Could not get a song');
@@ -1440,7 +1463,7 @@ const Game = {
     try {
       const item = await Pool.take((t) => { if (seq === this.djSeq) box.innerHTML = `<p class="muted">${esc(t)}</p>`; });
       if (seq !== this.djSeq) return;
-      if (!item) { box.innerHTML = '<p class="muted">No songs fit this pool. Tap the pool bar to change it.</p>'; return; }
+      if (!item) { box.innerHTML = `<p class="muted">${esc(Pool.emptyText())}</p>`; return; }
       this.djChoose(item);
     } catch (e) {
       box.innerHTML = '';
@@ -1534,9 +1557,11 @@ const Game = {
         };
         const renderGenres = () => {
           const all = GENRES.concat(draft.genres.filter((g) => !GENRES.includes(g)));
-          $b('[data-genres]').innerHTML = `<button class="chip holiday ${draft.holiday ? 'on' : ''}" data-x="holiday" aria-pressed="${!!draft.holiday}">Christmas &amp; holiday</button>`
-            + (draft.holiday ? '<p class="muted small" style="flex-basis:100%;margin:0 0 2px">Plays only Christmas and holiday songs. Add a playlist, artists, a genre or a decade to narrow it (Christmas songs by My Artists, 50s holiday songs).</p>' : '')
-            + all.map((g) => `<button class="chip ${draft.genres.includes(g) ? 'on' : ''}" data-x="genre" data-v="${esc(g)}">${esc(g)}</button>`).join('')
+          $b('[data-genres]').innerHTML = all.map((g) => `<button class="chip ${draft.genres.includes(g) ? 'on' : ''}" data-x="genre" data-v="${esc(g)}">${esc(g)}</button>`).join('')
+            + `<button class="chip ${draft.holiday ? 'on' : ''}" data-x="holiday" aria-pressed="${!!draft.holiday}">Holiday</button>`
+            + `<p class="muted small" style="flex-basis:100%;margin:2px 0 0">${draft.holiday
+              ? 'Holiday plays only Christmas and holiday songs. Add a playlist, artists, a genre or a decade to narrow it (Christmas songs by My Artists, 50s holiday songs).'
+              : 'Holiday songs stay out of every pool until Holiday is on.'}</p>`
             + (Pool.artistList(draft).length && draft.genres.length && !draft.playlists.length ? '<p class="muted small" style="flex-basis:100%;margin:2px 0 0">Genres are skipped while artists are picked.</p>' : '');
         };
         const renderDecades = () => {
@@ -1546,8 +1571,8 @@ const Game = {
           const h = draft.hits;
           $b('[data-hits]').innerHTML = `<button class="${h ? '' : 'on'}" data-x="hany">Any</button>` + BANDS.map((n, i) => `<button class="${h && i >= h[0] && i <= h[1] ? 'on' : ''}" data-x="hit" data-i="${i}">${n}</button>`).join('');
           if (draft.holiday) {
-            $b('[data-hitsnote]').textContent = (h ? this.hitsNote(h) + ' ' : 'Any: with only Christmas & holiday picked, it plays the 150 best-known holiday songs. ')
-              + 'With Christmas & holiday, these mean how well known a song is among holiday songs: big hits are the 50 best known on Last.fm, well known the next 100, then album tracks to 300, deep cuts to 600, rarities after that.';
+            $b('[data-hitsnote]').textContent = (h ? this.hitsNote(h) + ' ' : 'Any: with only Holiday picked, it plays the 150 best-known holiday songs. ')
+              + 'With Holiday on, these mean how well known a song is among holiday songs: big hits are the 50 best known on Last.fm, well known the next 100, then album tracks to 300, deep cuts to 600, rarities after that.';
             return;
           }
           $b('[data-hitsnote]').textContent = h

@@ -21,6 +21,7 @@
 }
 * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
 html, body { margin: 0; background: var(--bg); color: var(--text); font-family: var(--body); }
+html { touch-action: manipulation; }   /* no double-tap zoom */
 body { min-height: 100vh; min-height: 100dvh; overscroll-behavior-y: none; }
 button { font: inherit; color: inherit; cursor: pointer; }
 button:disabled { opacity: 0.45; cursor: default; }
@@ -194,7 +195,6 @@ input[type=range]::-moz-range-thumb { width: 24px; height: 24px; border-radius: 
 .who-btn .n { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .who-btn .pts { font-family: var(--mono); color: var(--muted); font-weight: 500; }
 .who-none { margin-top: 12px; }
-.chip.holiday { font-weight: 600; }
 
 @media (max-height: 760px) {
   .score-strip { margin-top: 6px; }

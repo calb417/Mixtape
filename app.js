@@ -14,7 +14,7 @@ const CONFIG = {
 // =====================================================================
 
 // The version lives in index.html (<meta name="mixtape-version">) so the update check can compare it.
-const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.11';
+const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.12';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -179,19 +179,40 @@ function applyTheme() {
 }
 
 /* ---------------- Keep the screen awake ---------------- */
+// iPhone: works in Home Screen apps from iOS 18.4. The iPhone can refuse or drop the lock (when Mixtape
+// opens without a tap, after a trip to the Home Screen), so it's asked for again on every tap.
+// Settings shows what the iPhone last answered.
 const Wake = {
-  lock: null,
+  lock: null, asking: false, state: '',
   async on() {
-    if (!Settings.get().keepAwake || !('wakeLock' in navigator) || this.lock || document.visibilityState !== 'visible') return;
+    if (!Settings.get().keepAwake) { this.state = 'off'; this.show(); return; }
+    if (!('wakeLock' in navigator)) { this.state = 'unsupported'; this.show(); return; }
+    if ((this.lock && !this.lock.released) || this.asking || document.visibilityState !== 'visible') return;
+    this.asking = true;
     try {
-      this.lock = await navigator.wakeLock.request('screen');
-      this.lock.addEventListener('release', () => { this.lock = null; });
-    } catch (e) { this.lock = null; }
+      const lock = await navigator.wakeLock.request('screen');
+      this.lock = lock;
+      this.state = 'on';
+      lock.addEventListener('release', () => { if (this.lock === lock) { this.lock = null; this.state = 'dropped'; this.show(); } });
+    } catch (e) {
+      this.lock = null;
+      this.state = 'refused:' + ((e && (e.name || e.message)) || 'error');
+    } finally { this.asking = false; this.show(); }
   },
-  off() { if (this.lock) { this.lock.release().catch(() => {}); this.lock = null; } },
+  off() { if (this.lock) { this.lock.release().catch(() => {}); this.lock = null; } this.state = 'off'; this.show(); },
+  label() {
+    const s = this.state;
+    if (s === 'on') return 'On now: the screen stays awake while Mixtape is open. The phone still locks with the side button.';
+    if (s === 'unsupported') return 'This iPhone can\'t keep the screen on for a Home Screen app. That needs iOS 18.4 or later (Settings → General → Software Update).';
+    if (s === 'dropped') return 'The iPhone let the screen lock go. Your next tap in Mixtape turns it back on.';
+    if (s.startsWith('refused')) return `The iPhone said no (${s.slice(8)}). Your next tap in Mixtape asks again.`;
+    return 'The phone still locks with the side button.';
+  },
+  show() { const el = document.getElementById('wake-status'); if (el) el.textContent = this.label(); },
 };
 document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') Wake.on(); });
-document.addEventListener('pointerdown', () => Wake.on(), { passive: true });
+window.addEventListener('pageshow', () => Wake.on());
+['pointerdown', 'touchend', 'click', 'keydown'].forEach((ev) => document.addEventListener(ev, () => Wake.on(), { passive: true, capture: true }));
 
 /* ---------------- Toast + sheets + help ---------------- */
 let toastTimer = null;
@@ -255,7 +276,7 @@ const HELP = {
   },
   game: {
     title: 'Guess the Intro',
-    html: `<ol><li><b>Pick the pool</b> with the bar next to Guess / DJ: playlists, artists (and their albums), Christmas &amp; holiday, genres, decades, and hits or deep cuts. Nothing picked plays popular songs.</li>
+    html: `<ol><li><b>Pick the pool</b> with the bar next to Guess / DJ: playlists, artists (and their albums), genres (and Holiday, for Christmas songs, which stay out of every other pool), decades, and hits or deep cuts. Nothing picked plays popular songs.</li>
       <li>Set the <b>clip length</b> with the slider or − / +. The left half is 0.1 to 1 second, the right half 1 to 60 seconds.</li>
       <li><b>Play clip</b> plays the very start of the song; the button fills up while it plays. Tap it again to hear the same clip again.</li>
       <li><b>More time</b> adds the starting length once per tap.</li>
@@ -546,6 +567,10 @@ function route() {
   window.scrollTo(0, 0);
 }
 window.addEventListener('hashchange', route);
+// No pinch-to-zoom anywhere. iPhones ignore the viewport's "no zoom" for pinches, so block the
+// gesture itself and any two-finger move (double-tap zoom is off through touch-action in styles.css).
+['gesturestart', 'gesturechange', 'gestureend'].forEach((ev) => document.addEventListener(ev, (e) => e.preventDefault(), { passive: false }));
+document.addEventListener('touchmove', (e) => { if (e.touches && e.touches.length > 1) e.preventDefault(); }, { passive: false });
 // The game screen never moves: block page swipes except inside lists, panels and sliders.
 document.addEventListener('touchmove', (e) => {
   if (!document.body.classList.contains('locked')) return;
@@ -644,7 +669,7 @@ Views.settings = {
 
       <div class="list-h">Screen</div>
       <div class="list">
-        <label class="li"><span>Keep screen on while Mixtape is open<div class="sub">The phone still locks with the side button.</div></span>
+        <label class="li"><span>Keep screen on while Mixtape is open<div class="sub" id="wake-status">${esc(Wake.label())}</div></span>
           <span class="switch"><input type="checkbox" data-s="keepAwake" ${s.keepAwake ? 'checked' : ''}><span></span></span></label>
       </div>
 
