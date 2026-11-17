@@ -167,6 +167,50 @@ const GENRES = ['rock', 'pop', 'hip-hop', 'alternative', 'indie', 'classic rock'
 const DEC = { '50s': { tag: '50s', from: 1950 }, '60s': { tag: '60s', from: 1960 }, '70s': { tag: '70s', from: 1970 }, '80s': { tag: '80s', from: 1980 },
   '90s': { tag: '90s', from: 1990 }, '00s': { tag: '00s', from: 2000 }, '10s': { tag: '2010s', from: 2010 }, '20s': { tag: '2020s', from: 2020 } };
 
+/* ================= Christmas & holiday songs ================= */
+// Last.fm tags songs (not just artists) "christmas", so the list is holiday songs only, best known first.
+// Title words catch the rest (a cover in a playlist that Last.fm's list doesn't have).
+const HOLIDAY_RE = /christmas|xmas|x-mas|\bsanta\b|\bjingle|\bsleigh|mistletoe|reindeer|rudolph|\bnoel\b|nowell|navidad|\byule|snowman|frosty|holly jolly|silent night|holy night|winter wonderland|let it snow|nutcracker|sugar plum|carol of the|hanukk?ah|chanukah|dreidel|kwanzaa|chestnuts|joy to the world|o come,? all ye|\bhark\b|deck the hall|silver bells|little drummer|away in a manger|three kings|twelve days|mele kalikimaka|happy holiday|merry little|cold outside|most wonderful time|god rest ye/i;
+const Holiday = {
+  data: null, loading: null,
+  load() {
+    if (this.data) return Promise.resolve(this.data);
+    if (!this.loading) {
+      this.loading = (async () => {
+        const soft = (e) => { if (e instanceof ApiError && /key|busy|reach/i.test(e.message)) throw e; return []; };
+        const lists = [];
+        for (const [tag, pages] of [['christmas', 4], ['xmas', 2], ['christmas music', 1]]) lists.push(await LastFM.tagTopTracks(tag, pages).catch(soft));
+        // Interleave by rank, so a song high on any of the lists stays near the front
+        const seen = new Set(), list = [], byTitle = new Map();
+        const longest = Math.max(0, ...lists.map((l) => l.length));
+        for (let i = 0; i < longest; i++) lists.forEach((l) => {
+          const x = l[i];
+          if (!x || NOT_STUDIO.test(x.t)) return;
+          const k = songKey(x.a, x.t);
+          if (seen.has(k)) return;
+          seen.add(k);
+          list.push(x);
+        });
+        list.forEach((x, i) => { const k = norm(x.t); if (!byTitle.has(k)) byTitle.set(k, []); byTitle.get(k).push({ a: x.a, i }); });
+        this.data = { list, byTitle };
+        return this.data;
+      })();
+      this.loading.catch(() => { this.loading = null; });
+    }
+    return this.loading;
+  },
+  // Where a song sits on the holiday list (-1 = not on it)
+  rank(d, a, t) {
+    const e = d && d.byTitle.get(norm(cleanTitle(t)));
+    if (!e) return -1;
+    const m = e.find((x) => sim(x.a, a) >= 0.8);
+    return m ? m.i : -1;
+  },
+  is(d, a, t) { return HOLIDAY_RE.test(t) || this.rank(d, a, t) >= 0; },
+  // With Christmas & holiday picked, "hits" means how well known the song is among holiday songs
+  band(i) { return i < 0 ? 4 : i < 50 ? 0 : i < 150 ? 1 : i < 300 ? 2 : i < 600 ? 3 : 4; },
+};
+
 const Pool = {
   gen: 0, list: null, arts: null, building: null, ahead: null, seen: new Set(), restarted: -1, useRecent: true, lastArtists: [],
   // Songs played in the last 7 days (up to 400), kept on the phone so a new session doesn't repeat them
@@ -190,7 +234,7 @@ const Pool = {
     this.lastArtists.push(norm(item.a));
     if (this.lastArtists.length > 6) this.lastArtists.shift();
   },
-  defaults: () => ({ playlists: [], artists: [], useMy: false, genres: [], decades: [], hits: null }),
+  defaults: () => ({ playlists: [], artists: [], useMy: false, holiday: false, genres: [], decades: [], hits: null }),
   // Picked artists plus, when "All of My Artists" is on, everyone in My Artists
   artistList(f) {
     if (!f.useMy || typeof MyArtists === 'undefined') return f.artists;
@@ -220,6 +264,7 @@ const Pool = {
     if (names.length) parts.push(names.join(' + '));
     if (f.useMy) parts.push('My Artists' + (f.artists.length ? ' + ' + f.artists.map((a) => a.name).join(' + ') : ''));
     else if (f.artists.length) parts.push(f.artists.map((a) => a.name).join(' + '));
+    if (f.holiday) parts.push('Christmas & holiday');
     if (f.decades.length) parts.push(f.decades.join(' + '));
     if (f.genres.length && !this.artistList(f).length) parts.push(f.genres.join(' + '));
     if (f.hits) parts.push(this.hitsText(f.hits).toLowerCase());
@@ -228,7 +273,8 @@ const Pool = {
   mode(f) {
     if (f.playlists.length) return 'P';        // saved playlists, filtered
     if (this.artistList(f).length) return 'A'; // picked artists (and albums), or My Artists
-    return 'B';                                // well-known artists of the genres / decades / charts, then their songs
+    if (f.holiday) return 'H';                 // Christmas & holiday songs (Last.fm's holiday list)
+    return 'B';                              // well-known artists of the genres / decades / charts, then their songs
   },
   async build(f, mode, status) {
     if (mode === 'P') {
@@ -239,6 +285,13 @@ const Pool = {
       return;
     }
     if (mode === 'A') { this.arts = this.artistList(f).map((a) => ({ a, tracks: null })); return; }
+    if (mode === 'H') {
+      status('Gathering Christmas and holiday songs…');
+      const d = await Holiday.load();
+      const range = f.hits || [0, 1];
+      this.list = shuffle(d.list.filter((x, i) => { const b = Holiday.band(i); return b >= range[0] && b <= range[1]; }).map((x) => ({ a: x.a, t: x.t, src: 'holiday' })));
+      return;
+    }
     const hard = (e) => { if (e instanceof ApiError && /key|busy|reach/i.test(e.message)) throw e; return []; };
     status('Gathering artists…');
     // Ranked lists, most popular first; "90s rock" style tags first when both a genre and a decade are picked
@@ -270,12 +323,31 @@ const Pool = {
     const a = e.a;
     const range = f.hits || (mode === 'A' ? [0, 2] : [0, 1]);
     let list;
-    if (mode === 'A' && a.albums && a.albums.length) {
+    const albumSongs = async () => {
       const sets = await Promise.all(a.albums.map((al) => MB.albumTracks(al.id, 1).catch(() => ({ tracks: [] }))));
       const seen = new Set();
-      list = sets.flatMap((s) => s.tracks).map((t) => cleanTitle(t.t))
+      return sets.flatMap((s) => s.tracks).map((t) => cleanTitle(t.t))
         .filter((t) => { const k = norm(t); if (!k || seen.has(k) || NOT_STUDIO.test(t)) return false; seen.add(k); return true; })
         .map((t) => ({ a: a.name, t, src: 'artist' }));
+    };
+    if (f.holiday) {
+      // Just this artist's Christmas and holiday songs
+      const d = await Holiday.load().catch(() => null);
+      if (mode === 'A' && a.albums && a.albums.length) list = (await albumSongs()).filter((x) => Holiday.is(d, a.name, x.t));
+      else {
+        const have = new Set();
+        list = (await LastFM.topTracks(a.name)).filter((x) => Holiday.is(d, x.a, x.t)).map((x) => { have.add(norm(x.t)); return { a: x.a, t: x.t, src: 'artist' }; });
+        if (d) d.list.forEach((x) => { if (sim(x.a, a.name) >= 0.85 && !have.has(norm(x.t))) { have.add(norm(x.t)); list.push({ a: x.a, t: x.t, src: 'artist' }); } });
+      }
+      if (f.hits && d) {
+        const inBand = list.filter((x) => { const b = Holiday.band(Holiday.rank(d, x.a, x.t)); return b >= f.hits[0] && b <= f.hits[1]; });
+        if (inBand.length) list = inBand;
+      }
+      e.tracks = shuffle(list);
+      return e.tracks;
+    }
+    if (mode === 'A' && a.albums && a.albums.length) {
+      list = await albumSongs();
       if (f.hits) {
         const top = await LastFM.topTracks(a.name).catch(() => []);
         const rank = new Map(top.map((x, i) => [norm(x.t), i]));
@@ -293,7 +365,7 @@ const Pool = {
     return e.tracks;
   },
   async candidate(f, mode) {
-    if (mode === 'P') return this.list.length ? this.list.pop() : null;
+    if (mode === 'P' || mode === 'H') return this.list.length ? this.list.pop() : null;
     for (let tries = 0; tries < 25; tries++) {
       const live = this.arts.filter((e) => !e.done);
       if (!live.length) return null;
@@ -314,9 +386,9 @@ const Pool = {
     if (this.seen.has(k) || (c.v && (this.seen.has(c.v) || blocked.has(c.v)))) return null;
     if (this.useRecent) { const rec = this.loadRecent(); if (rec.has(k) || (c.v && rec.has(c.v))) return null; }
     if (spread && mode !== 'A' && this.lastArtists.includes(norm(c.a))) { this.spreadSkips++; return null; }   // not the same artist again so soon
-    if (mode === 'P') {
+    if (mode === 'P' || mode === 'H') {
       const al = this.artistList(f);
-      if (al.length) {
+      if (mode === 'P' && al.length) {
         const art = al.find((a) => sim(a.name, c.a) >= 0.8);
         if (!art) return null;
         if (art.albums && art.albums.length && !(await this.albumTitles(art)).has(norm(cleanTitle(c.t)))) return null;
@@ -324,7 +396,12 @@ const Pool = {
         const tags = await LastFM.artistTags(c.a).catch(() => []);
         if (!f.genres.some((g) => tags.some((t) => t === g || t.includes(g)))) return null;
       }
-      if (f.hits) {
+      if (mode === 'P' && f.holiday) {
+        // A playlist's Christmas and holiday songs; hits = how well known among holiday songs
+        const d = await Holiday.load().catch(() => null);
+        if (!Holiday.is(d, c.a, c.t)) return null;
+        if (f.hits) { const b = d ? Holiday.band(Holiday.rank(d, c.a, c.t)) : 4; if (b < f.hits[0] || b > f.hits[1]) return null; }
+      } else if (mode === 'P' && f.hits) {
         const top = await LastFM.topTracks(c.a).catch(() => []);
         const i = top.findIndex((x) => norm(x.t) === norm(cleanTitle(c.t)));
         const b = bandOf(top, i);
@@ -397,7 +474,7 @@ const Pool = {
     if (!this.building) { this.building = this.build(f, mode, () => {}); this.building.catch(() => { if (gen === this.gen) this.building = null; }); }
     await this.building;
     const fresh = (c) => !this.seen.has(songKey(c.a, c.t));
-    if (mode === 'P') return shuffle(this.list.filter(fresh)).slice(0, n);
+    if (mode === 'P' || mode === 'H') return shuffle(this.list.filter(fresh)).slice(0, n);
     const live = this.arts.filter((e) => !e.done);
     const arts = mode === 'A' ? shuffle(live).slice(0, 8) : shuffle(live.slice(0, 30)).slice(0, 10);
     const out = [];
@@ -438,6 +515,20 @@ function nearestStop(p) {
   return best;
 }
 
+/* ================= Keep score (saved on this phone only, not synced) ================= */
+ICON.score = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M7 4h10v5a5 5 0 0 1-10 0z"/><path d="M7 6H4a3 3 0 0 0 3 4M17 6h3a3 3 0 0 1-3 4"/><path d="M12 14v4M8 20h8"/></svg>';
+ICON.expand = '<svg viewBox="0 0 14 10" width="14" height="10" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M2 2l5 5 5-5"/></svg>';
+const Score = {
+  get() {
+    const s = Store.get('score', null) || {};
+    return { on: !!s.on, players: Array.isArray(s.players) ? s.players.filter((p) => p && p.id) : [] };
+  },
+  save(s) { Store.set('score', s); },
+  active() { const s = this.get(); return s.on && s.players.length > 0; },
+  top(s) { return Math.max(0, ...s.players.map((p) => p.pts)); },
+  newId() { return 'p' + Date.now().toString(36) + Math.floor(Math.random() * 1e4).toString(36); },
+};
+
 /* ================= Game ================= */
 const Game = {
   mode: 'guess',          // 'guess' | 'dj'
@@ -466,8 +557,10 @@ const Game = {
           <button data-g="mode-guess" class="${dj ? '' : 'on'}" role="tab" aria-selected="${!dj}">Guess</button>
           <button data-g="mode-dj" class="${dj ? 'on' : ''}" role="tab" aria-selected="${dj}">DJ</button>
         </div>
+        <button class="icon-btn score-btn ${Score.active() ? 'on' : ''}" data-g="score" id="g-scorebtn" aria-label="Keep score">${ICON.score}</button>
         <button class="pool-chip" data-g="pools" aria-label="Song pool: ${esc(Pool.label())}">${ICON.filter}<span class="name">${esc(Pool.label())}</span></button>
       </div>
+      <div class="score-strip" id="g-score" ${Score.active() ? '' : 'hidden'}>${this.scoreStrip()}</div>
 
       <div id="dj-pick" class="dj-pick" ${dj && this.djPicking ? '' : 'hidden'}>
         <div class="row">
@@ -607,15 +700,16 @@ const Game = {
         shorter: () => this.setClipIndex(Settings.get().clipIndex - 1),
         longer: () => this.setClipIndex(Settings.get().clipIndex + 1),
         reveal: () => this.reveal(),
-        next: () => this.next(),
+        next: () => this.endRound(() => this.next()),
+        score: () => this.openScore(),
         pp: () => this.togglePause(),
         restart: () => { try { Player.yt.seekTo(0, true); Player.yt.unMute(); Player.yt.playVideo(); } catch (err) { /* ignore */ } },
         ytm: () => { if (this.round) { Player.stop(); openYTMusic(this.round.item.v); } },
         'dj-yt': () => this.djSearchYouTube(),
         'dj-random': () => this.djRandom(),
         'dj-new': () => this.djRandomRound(),
-        'dj-again': () => { this.unreveal(); setTimeout(() => this.showDJPick(), 300); },
-        'dj-pass': () => this.passPhone(),
+        'dj-again': () => this.endRound(() => { this.unreveal(); setTimeout(() => this.showDJPick(), 300); }),
+        'dj-pass': () => this.endRound(() => this.passPhone()),
       };
       if (!map[a]) return;
       if (this.round == null && ['undo', 'back', 'zero', 'skip', 'more', 'play', 'reveal', 'pp', 'restart'].includes(a)) return;
@@ -709,7 +803,7 @@ const Game = {
     if (myRound !== this.roundSeq) return;
     if (!item) {
       const f = Pool.get();
-      const empty = !f.playlists.length && !Pool.artistList(f).length && !f.genres.length && !f.decades.length && !LastFM.ready();
+      const empty = !f.playlists.length && !Pool.artistList(f).length && !f.holiday && !f.genres.length && !f.decades.length && !LastFM.ready();
       this.caption(empty ? 'Pick a pool to start' : 'No songs fit this pool. Tap the pool bar to change it.');
       if (empty) setTimeout(() => this.openPools(() => { this.round = null; route(); }), 400);
       return;
@@ -1124,6 +1218,140 @@ const Game = {
     setTimeout(() => { if (this.round && this.round.phase !== 'revealed' && currentView === Views.game) this.restoreRound(); }, 500);
   },
 
+  /* ---- Keep score ---- */
+  // The one-line scoreboard under the pool bar; the button on its right opens the full scoreboard
+  scoreStrip() {
+    const s = Score.get(), top = Score.top(s);
+    return `<div class="sc-list" data-g="score">${s.players.map((p) => `<span class="sc-chip ${top > 0 && p.pts === top ? 'lead' : ''}"><span class="n">${esc(p.name)}</span><b>${p.pts}</b></span>`).join('')}</div>
+      <button class="sc-open" data-g="score" aria-label="Open the scoreboard">${ICON.expand}</button>`;
+  },
+  renderScore() {
+    const strip = $('#g-score'), btn = $('#g-scorebtn');
+    if (strip) { strip.hidden = !Score.active(); strip.innerHTML = this.scoreStrip(); }
+    if (btn) btn.classList.toggle('on', Score.active());
+  },
+  // A round ends (Next song, Pick again, Pass the phone): if the song was revealed, ask who got it first
+  endRound(then) {
+    const r = this.round;
+    if (!Score.active() || !r || r.phase !== 'revealed' || r.scored) { then(); return; }
+    this.askWho(r, then);
+  },
+  askWho(r, then) {
+    const s = Score.get();
+    let done = false;
+    Sheets.open({
+      title: 'Who got it?',
+      html: `<p class="muted small" style="margin-top:0">${esc(r.item.t)} · ${esc(r.item.a)}</p>
+        <div class="who">${s.players.map((p) => `<button class="btn who-btn" data-w="${esc(p.id)}"><span class="n">${esc(p.name)}</span><span class="pts">${p.pts}</span></button>`).join('')}</div>
+        <button class="btn wide who-none" data-w="none">Nobody got it</button>`,
+      onMount: (body, close) => {
+        body.addEventListener('click', (e) => {
+          const b = e.target.closest('[data-w]');
+          if (!b) return;
+          if (b.dataset.w !== 'none') {
+            const cur = Score.get(), p = cur.players.find((x) => x.id === b.dataset.w);
+            if (p) { p.pts += 1; Score.save(cur); toast(`+1 for ${p.name} (${p.pts})`); }
+          }
+          r.scored = true;
+          done = true;
+          close();
+        });
+      },
+      // Closing with × keeps the song on screen; nothing is scored
+      onClose: () => { this.renderScore(); if (done) then(); },
+    });
+  },
+  // Setting up players, and the full scoreboard (edit, reset, stop)
+  openScore() {
+    let order = Score.get().players.slice().sort((a, b) => b.pts - a.pts).map((p) => p.id);   // highest first, as opened
+    Sheets.open({
+      title: 'Keep score',
+      html: '<div data-sc></div>',
+      onMount: (body, close) => {
+        const box = body.querySelector('[data-sc]');
+        const render = () => {
+          const s = Score.get(), byId = new Map(s.players.map((p) => [p.id, p])), top = Score.top(s);
+          order = order.filter((id) => byId.has(id));
+          s.players.forEach((p) => { if (!order.includes(p.id)) order.push(p.id); });
+          const rows = order.map((id) => {
+            const p = byId.get(id), lead = top > 0 && p.pts === top;
+            return `<div class="sc-row ${lead ? 'lead' : ''}" data-id="${esc(p.id)}">
+              <input class="field sc-name" data-k="name" value="${esc(p.name)}" aria-label="Name" autocomplete="off" spellcheck="false">
+              <button class="icon-btn sc-step" data-k="minus" aria-label="One point less for ${esc(p.name)}">−</button>
+              <input class="sc-pts" data-k="pts" value="${p.pts}" inputmode="numeric" pattern="[0-9]*" aria-label="Score for ${esc(p.name)}">
+              <button class="icon-btn sc-step" data-k="plus" aria-label="One point more for ${esc(p.name)}">+</button>
+              <button class="icon-btn sc-del" data-k="del" aria-label="Remove ${esc(p.name)}">${ICON.close}</button></div>`;
+          }).join('');
+          const anyPts = s.players.some((p) => p.pts > 0);
+          box.innerHTML = `<p class="muted small" style="margin-top:0">${s.on
+              ? 'After each revealed song, Mixtape asks who got it. Fix a score here with − and +, or type it in.'
+              : 'Add everyone who\'s playing, then tap Start keeping score. After each revealed song, Mixtape asks who got it.'}</p>
+            ${rows ? `<div class="sc-rows">${rows}</div>` : '<p class="muted">No players yet.</p>'}
+            <div class="row sc-add"><input class="field" data-k="newname" placeholder="Player's name" autocomplete="off" spellcheck="false" enterkeyhint="done"><button class="btn small" data-k="add">Add</button></div>
+            <div class="sc-actions">
+              ${s.on ? '<button class="btn" data-k="stop">Stop keeping score</button>'
+                : `<button class="btn primary" data-k="start" ${s.players.length ? '' : 'disabled'}>Start keeping score</button>`}
+              ${anyPts ? '<button class="btn sc-reset" data-k="reset">Reset scores</button>' : ''}
+            </div>`;
+        };
+        const save = (fn) => { const s = Score.get(); fn(s); Score.save(s); this.renderScore(); };
+        const addPlayer = () => {
+          const inp = box.querySelector('[data-k=newname]');
+          const name = inp.value.trim();
+          if (!name) { inp.focus(); return; }
+          save((s) => s.players.push({ id: Score.newId(), name: name.slice(0, 30), pts: 0 }));
+          render();
+          const again = box.querySelector('[data-k=newname]');
+          if (again) again.focus();
+        };
+        render();
+        box.addEventListener('click', (e) => {
+          const b = e.target.closest('button[data-k]');
+          if (!b || b.disabled) return;
+          const k = b.dataset.k, row = b.closest('[data-id]'), id = row && row.dataset.id;
+          const each = (fn) => save((s) => { const p = s.players.find((x) => x.id === id); if (p) fn(p, s); });
+          if (k === 'plus') each((p) => { p.pts += 1; });
+          if (k === 'minus') each((p) => { p.pts = Math.max(0, p.pts - 1); });
+          if (k === 'del') {
+            const p = Score.get().players.find((x) => x.id === id);
+            if (!p || !confirm(`Remove ${p.name}? Their score goes too.`)) return;
+            save((s) => { s.players = s.players.filter((x) => x.id !== id); if (!s.players.length) s.on = false; });
+          }
+          if (k === 'add') { addPlayer(); return; }
+          if (k === 'start') { save((s) => { s.on = true; }); toast('Keeping score'); close(); return; }
+          if (k === 'stop') { save((s) => { s.on = false; }); toast('Stopped keeping score. Scores are kept for next time.'); close(); return; }
+          if (k === 'reset') {
+            if (!confirm('Are you sure? This starts a new game: every score goes back to 0. The players stay.')) return;
+            save((s) => s.players.forEach((p) => { p.pts = 0; }));
+            toast('New game: scores reset');
+          }
+          render();
+        });
+        box.addEventListener('keydown', (e) => {
+          if (e.key !== 'Enter') return;
+          if (e.target.dataset.k === 'newname') { e.preventDefault(); addPlayer(); }
+          else if (e.target.dataset.k === 'name' || e.target.dataset.k === 'pts') { e.preventDefault(); e.target.blur(); }
+        });
+        // Typed names and scores save when the box loses focus
+        box.addEventListener('change', (e) => {
+          const t = e.target, row = t.closest('[data-id]');
+          if (!row) return;
+          const id = row.dataset.id;
+          if (t.dataset.k === 'name') {
+            const v = t.value.trim().slice(0, 30);
+            if (v) save((s) => { const p = s.players.find((x) => x.id === id); if (p) p.name = v; });
+            else render();
+          }
+          if (t.dataset.k === 'pts') {
+            const n = parseInt(t.value.replace(/\D/g, ''), 10);
+            save((s) => { const p = s.players.find((x) => x.id === id); if (p) { p.pts = Number.isFinite(n) ? Math.min(n, 9999) : p.pts; t.value = p.pts; } });
+          }
+        });
+      },
+      onClose: () => this.renderScore(),
+    });
+  },
+
   /* ---- DJ mode ---- */
   djCandidates: [],
   showDJPick() {
@@ -1306,7 +1534,9 @@ const Game = {
         };
         const renderGenres = () => {
           const all = GENRES.concat(draft.genres.filter((g) => !GENRES.includes(g)));
-          $b('[data-genres]').innerHTML = all.map((g) => `<button class="chip ${draft.genres.includes(g) ? 'on' : ''}" data-x="genre" data-v="${esc(g)}">${esc(g)}</button>`).join('')
+          $b('[data-genres]').innerHTML = `<button class="chip holiday ${draft.holiday ? 'on' : ''}" data-x="holiday" aria-pressed="${!!draft.holiday}">Christmas &amp; holiday</button>`
+            + (draft.holiday ? '<p class="muted small" style="flex-basis:100%;margin:0 0 2px">Plays only Christmas and holiday songs. Add a playlist, artists, a genre or a decade to narrow it (Christmas songs by My Artists, 50s holiday songs).</p>' : '')
+            + all.map((g) => `<button class="chip ${draft.genres.includes(g) ? 'on' : ''}" data-x="genre" data-v="${esc(g)}">${esc(g)}</button>`).join('')
             + (Pool.artistList(draft).length && draft.genres.length && !draft.playlists.length ? '<p class="muted small" style="flex-basis:100%;margin:2px 0 0">Genres are skipped while artists are picked.</p>' : '');
         };
         const renderDecades = () => {
@@ -1315,6 +1545,11 @@ const Game = {
         const renderHits = () => {
           const h = draft.hits;
           $b('[data-hits]').innerHTML = `<button class="${h ? '' : 'on'}" data-x="hany">Any</button>` + BANDS.map((n, i) => `<button class="${h && i >= h[0] && i <= h[1] ? 'on' : ''}" data-x="hit" data-i="${i}">${n}</button>`).join('');
+          if (draft.holiday) {
+            $b('[data-hitsnote]').textContent = (h ? this.hitsNote(h) + ' ' : 'Any: with only Christmas & holiday picked, it plays the 150 best-known holiday songs. ')
+              + 'With Christmas & holiday, these mean how well known a song is among holiday songs: big hits are the 50 best known on Last.fm, well known the next 100, then album tracks to 300, deep cuts to 600, rarities after that.';
+            return;
+          }
           $b('[data-hitsnote]').textContent = h
             ? `${this.hitsNote(h)} Big hits are an artist's top 3 songs on Last.fm (just the top one for a one-hit wonder); well known is the rest of their top 5. With genres, decades or nothing picked, songs come from well-known artists. Tap more steps to widen the range.`
             : 'Any: playlists play every song, picked artists play their hits through album tracks, and genres and decades play big hits and well-known songs by well-known artists.';
@@ -1427,6 +1662,7 @@ const Game = {
               const art = draft.artists[parseInt(b.dataset.i, 10)];
               if (art) this.albumPicker(art, () => { renderArtists(); renderNow(); });
             }
+            if (x === 'holiday') { draft.holiday = !draft.holiday; renderGenres(); renderHits(); renderNow(); }
             if (x === 'genre') { const v = b.dataset.v; draft.genres = draft.genres.includes(v) ? draft.genres.filter((g) => g !== v) : draft.genres.concat(v); renderGenres(); renderNow(); }
             if (x === 'gadd') {
               const inp = $b('[data-x=gother]');

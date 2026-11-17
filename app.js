@@ -14,7 +14,7 @@ const CONFIG = {
 // =====================================================================
 
 // The version lives in index.html (<meta name="mixtape-version">) so the update check can compare it.
-const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.10';
+const APP_VERSION = (document.querySelector('meta[name=mixtape-version]') || {}).content || '3.11';
 
 /* ---------------- On-screen errors (so they can be screenshotted) ---------------- */
 const Errors = {
@@ -255,12 +255,13 @@ const HELP = {
   },
   game: {
     title: 'Guess the Intro',
-    html: `<ol><li><b>Pick the pool</b> with the bar next to Guess / DJ: playlists, artists (and their albums), genres, decades, and hits or deep cuts. Nothing picked plays popular songs.</li>
+    html: `<ol><li><b>Pick the pool</b> with the bar next to Guess / DJ: playlists, artists (and their albums), Christmas &amp; holiday, genres, decades, and hits or deep cuts. Nothing picked plays popular songs.</li>
       <li>Set the <b>clip length</b> with the slider or − / +. The left half is 0.1 to 1 second, the right half 1 to 60 seconds.</li>
       <li><b>Play clip</b> plays the very start of the song; the button fills up while it plays. Tap it again to hear the same clip again.</li>
       <li><b>More time</b> adds the starting length once per tap.</li>
       <li><b>Skip silence</b>: if a clip was silent, the next try starts where it ended. <b>Undo</b>, <b>−0.25 s</b> and <b>0:00</b> step back. Nothing is saved.</li>
       <li><b>Reveal</b> flips the card and plays the rest of the song, with pause and a scrub bar. Tap the song, artist or album for its info card. <b>Next song</b> moves on.</li></ol>
+      <h3>Keeping score</h3><p>Tap the <b>trophy</b> next to Guess / DJ, add everyone's name and tap <b>Start keeping score</b>. The scores show under the pool bar. After each revealed song, <b>Next song</b> (or Pick again / Pass the phone in DJ) asks <b>Who got it?</b>: tap a name, or <b>Nobody got it</b>. Tap the scores (or the arrow next to them) to open the scoreboard: fix a score with − and + or type it in, add or remove players, <b>Reset scores</b> for a new game, or stop keeping score. Scores stay on this phone.</p>
       <h3>DJ Mode</h3><p>Switch to DJ at the top. The DJ taps <b>Random pick</b> (from the pool), searches your playlists, or searches all of YouTube. The album art and song stay on screen for the DJ. <b>Pass the phone</b> blanks the screen for the next DJ.</p>
       <h3>Locking the phone</h3><p>If the phone locks before Reveal, Mixtape drops the song so the lock screen can't give it away, and reloads it when you come back.</p>`,
   },
@@ -548,7 +549,7 @@ window.addEventListener('hashchange', route);
 // The game screen never moves: block page swipes except inside lists, panels and sliders.
 document.addEventListener('touchmove', (e) => {
   if (!document.body.classList.contains('locked')) return;
-  if (e.target.closest && e.target.closest('.sheet, .results, input[type=range], .yt-wrap.unlock')) return;
+  if (e.target.closest && e.target.closest('.sheet, .results, .score-strip, input[type=range], .yt-wrap.unlock')) return;
   e.preventDefault();
 }, { passive: false });
 
